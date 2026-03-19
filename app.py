@@ -1,0 +1,558 @@
+"""
+Outreach UI – Streamlit dashboard
+----------------------------------
+Wraps the existing scraper and bulk-emailer scripts in a browser-based UI.
+
+Run:
+    streamlit run app.py
+"""
+
+import csv
+import imaplib
+import io
+import logging
+import os
+import queue
+import smtplib
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="Outreach Dashboard",
+    page_icon="📧",
+    layout="wide",
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+LEADS_CSV = "leads.csv"
+SENT_LOG_CSV = "sent_log.csv"
+UNSUBSCRIBE_TXT = "unsubscribe.txt"
+EMAIL_TEMPLATE_TXT = "email_template.txt"
+
+BING_FIELDNAMES = [
+    "keyword", "url", "title", "email", "phone",
+    "linkedin", "twitter", "facebook", "instagram",
+    "contact_page", "issues", "lead_score",
+]
+MAPS_FIELDNAMES = [
+    "keyword", "name", "address", "phone", "website", "rating", "reviews",
+    "category", "email", "linkedin", "twitter", "facebook", "instagram",
+    "contact_page", "issues", "lead_score",
+]
+
+
+def _read_csv(path: str) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return pd.DataFrame()
+    return pd.read_csv(p, dtype=str).fillna("")
+
+
+def _write_csv(path: str, df: pd.DataFrame) -> None:
+    df.to_csv(path, index=False)
+
+
+def _default_template() -> str:
+    p = Path(EMAIL_TEMPLATE_TXT)
+    if p.exists():
+        return p.read_text(encoding="utf-8")
+    return (
+        "Hi {name},\n\n"
+        "I came across {url} and wanted to reach out.\n\n"
+        "Best regards,\n{from_name}\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Logging capture helper (routes stdlib logging into a queue)
+# ---------------------------------------------------------------------------
+
+class _QueueHandler(logging.Handler):
+    def __init__(self, q: queue.Queue):
+        super().__init__()
+        self.q = q
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.q.put(self.format(record))
+
+
+# ---------------------------------------------------------------------------
+# Tab: Scrape
+# ---------------------------------------------------------------------------
+
+def tab_scrape() -> None:
+    st.header("🔍 Scrape Leads")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        keyword = st.text_input("Search keyword", placeholder="e.g. digital agency London")
+    with col2:
+        num_results = st.number_input("Number of results", min_value=1, max_value=200, value=10, step=5)
+
+    engine = st.radio("Search engine", ["Google Maps", "Bing"], horizontal=True)
+    output_path = st.text_input("Save results to", value=LEADS_CSV)
+    append = st.checkbox("Append to existing CSV (instead of overwrite)", value=True)
+
+    run_btn = st.button("▶ Run Scraper", type="primary", disabled=not keyword.strip())
+
+    log_box = st.empty()
+    result_box = st.empty()
+
+    if run_btn and keyword.strip():
+        log_lines: list[str] = []
+        log_q: queue.Queue = queue.Queue()
+
+        # Attach queue handler to the root logger so scraper output is captured
+        q_handler = _QueueHandler(log_q)
+        q_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(q_handler)
+
+        records: list[dict] = []
+        error_holder: list[str] = []
+
+        def _run() -> None:
+            try:
+                if engine == "Bing":
+                    from bing_email_scraper import scrape, save_to_csv
+                    records.extend(scrape(keyword=keyword.strip(), num_results=int(num_results)))
+                    if records:
+                        if append and Path(output_path).exists():
+                            existing = _read_csv(output_path)
+                            combined = pd.concat(
+                                [existing, pd.DataFrame(records)], ignore_index=True
+                            ).drop_duplicates()
+                            _write_csv(output_path, combined)
+                        else:
+                            save_to_csv(records, output_path)
+                else:
+                    from google_maps_scraper import scrape as maps_scrape, save_to_csv as maps_save
+                    records.extend(maps_scrape(keyword=keyword.strip(), num_results=int(num_results)))
+                    if records:
+                        if append and Path(output_path).exists():
+                            existing = _read_csv(output_path)
+                            combined = pd.concat(
+                                [existing, pd.DataFrame(records)], ignore_index=True
+                            ).drop_duplicates()
+                            _write_csv(output_path, combined)
+                        else:
+                            maps_save(records, output_path)
+            except ImportError as exc:
+                error_holder.append(f"Missing dependency: {exc}. Run `pip install -r requirements.txt`.")
+            except OSError as exc:
+                error_holder.append(f"File error while saving results: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                error_holder.append(f"Scraper error ({type(exc).__name__}): {exc}")
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+        progress = st.progress(0, text="Scraping…")
+        tick = 0
+        while thread.is_alive():
+            while not log_q.empty():
+                log_lines.append(log_q.get_nowait())
+            log_box.text_area("Live log", "\n".join(log_lines[-60:]), height=220, key=f"log_{tick}")
+            tick += 1
+            progress.progress(min(tick % 100, 99), text="Scraping…")
+            time.sleep(0.5)
+
+        # Drain remaining log messages
+        while not log_q.empty():
+            log_lines.append(log_q.get_nowait())
+        root_logger.removeHandler(q_handler)
+
+        progress.progress(100, text="Done")
+        log_box.text_area("Live log", "\n".join(log_lines[-60:]), height=220, key="log_final")
+
+        if error_holder:
+            st.error(f"Scraper error: {error_holder[0]}")
+        elif records:
+            st.success(f"✅ Scraped {len(records)} row(s) → saved to `{output_path}`")
+            df = pd.DataFrame(records)
+            result_box.dataframe(df, use_container_width=True)
+
+            csv_bytes = df.to_csv(index=False).encode()
+            st.download_button(
+                "⬇ Download results CSV",
+                data=csv_bytes,
+                file_name=Path(output_path).name,
+                mime="text/csv",
+            )
+        else:
+            st.warning("No records returned. Try a different keyword or engine.")
+
+
+# ---------------------------------------------------------------------------
+# Tab: Leads
+# ---------------------------------------------------------------------------
+
+def tab_leads() -> None:
+    st.header("📋 Leads")
+
+    uploaded = st.file_uploader("Upload a leads CSV", type="csv")
+    if uploaded:
+        df = pd.read_csv(uploaded, dtype=str).fillna("")
+        st.session_state["leads_df"] = df
+        st.success(f"Loaded {len(df)} rows from uploaded file.")
+    elif Path(LEADS_CSV).exists():
+        if st.button("Load leads.csv from disk"):
+            st.session_state["leads_df"] = _read_csv(LEADS_CSV)
+
+    df: pd.DataFrame = st.session_state.get("leads_df", pd.DataFrame())
+    if df.empty:
+        st.info("No leads loaded yet. Upload a CSV or run the scraper first.")
+        return
+
+    st.write(f"**{len(df)} total rows**")
+
+    # Filters
+    with st.expander("Filters", expanded=True):
+        fcol1, fcol2, fcol3 = st.columns(3)
+        with fcol1:
+            has_email = st.checkbox("Only rows with email", value=False)
+        with fcol2:
+            min_score: int = 0
+            if "lead_score" in df.columns:
+                scores = pd.to_numeric(df["lead_score"], errors="coerce").dropna()
+                if not scores.empty:
+                    min_score = st.slider(
+                        "Minimum lead score",
+                        int(scores.min()),
+                        int(scores.max()),
+                        int(scores.min()),
+                    )
+        with fcol3:
+            category_col = "category" if "category" in df.columns else None
+            category_filter = ""
+            if category_col:
+                cats = ["(all)"] + sorted(df[category_col].dropna().unique().tolist())
+                category_filter = st.selectbox("Category", cats)
+
+    filtered = df.copy()
+    if has_email and "email" in filtered.columns:
+        filtered = filtered[filtered["email"].str.strip() != ""]
+    if "lead_score" in filtered.columns and min_score:
+        filtered = filtered[pd.to_numeric(filtered["lead_score"], errors="coerce").fillna(0) >= min_score]
+    if category_col and category_filter and category_filter != "(all)":
+        filtered = filtered[filtered[category_col] == category_filter]
+
+    st.write(f"**{len(filtered)} rows after filters**")
+    st.dataframe(filtered, use_container_width=True)
+
+    csv_bytes = filtered.to_csv(index=False).encode()
+    st.download_button(
+        "⬇ Download filtered CSV",
+        data=csv_bytes,
+        file_name="filtered_leads.csv",
+        mime="text/csv",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tab: Compose & Send
+# ---------------------------------------------------------------------------
+
+def tab_send() -> None:
+    st.header("✉️ Compose & Send")
+
+    with st.expander("SMTP Settings", expanded=True):
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            smtp_host = st.text_input("SMTP Host", value=os.environ.get("SMTP_HOST", "smtp.gmail.com"))
+            from_email = st.text_input("From Email", value=os.environ.get("EMAIL_ADDRESS", ""))
+        with sc2:
+            smtp_port = st.number_input("SMTP Port", value=587, step=1)
+            password = st.text_input("Password / App Password", type="password",
+                                     value=os.environ.get("EMAIL_PASSWORD", ""))
+        use_ssl = st.checkbox("Use SSL (port 465)", value=False)
+        from_name = st.text_input("Sender Display Name", value="")
+
+    with st.expander("Email Content", expanded=True):
+        subject = st.text_input("Subject (use {name}, {url}, etc.)", value="Quick question for {name}")
+        template_body = st.text_area("Email body template", value=_default_template(), height=220)
+        is_html = st.checkbox("HTML email", value=False)
+
+    with st.expander("Sending Options", expanded=False):
+        leads_csv = st.text_input("Leads CSV path", value=LEADS_CSV)
+        sent_log = st.text_input("Sent log CSV path", value=SENT_LOG_CSV)
+        unsub_file = st.text_input("Unsubscribe list path", value=UNSUBSCRIBE_TXT)
+        delay = st.slider("Delay between sends (seconds)", 0.5, 10.0, 2.0, 0.5)
+
+    dry_run = st.checkbox("Dry run (preview only – no emails sent)", value=True)
+
+    send_btn = st.button(
+        "▶ Send Emails" if not dry_run else "👁 Preview Recipients",
+        type="primary",
+        disabled=not (smtp_host and from_email and (dry_run or password)),
+    )
+
+    if send_btn:
+        import argparse
+        import importlib
+        be = importlib.import_module("bulk_emailer")
+
+        # Build an args namespace matching bulk_emailer.cmd_send expectations
+        ns = argparse.Namespace(
+            csv=leads_csv,
+            template=None,          # we'll monkey-patch template_body below
+            subject=subject,
+            from_name=from_name,
+            smtp_host=smtp_host,
+            smtp_port=int(smtp_port),
+            ssl=use_ssl,
+            email=from_email,
+            password=password,
+            log=sent_log,
+            unsubscribe=unsub_file,
+            delay=float(delay),
+            html=is_html,
+            dry_run=dry_run,
+        )
+
+        # Write template to a cross-platform temp file so bulk_emailer can read it
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="outreach_template_", delete=False, encoding="utf-8"
+        ) as tmp_f:
+            tmp_f.write(template_body)
+            tmp_template_path = tmp_f.name
+        ns.template = tmp_template_path
+
+        log_lines: list[str] = []
+        log_q: queue.Queue = queue.Queue()
+        q_handler = _QueueHandler(log_q)
+        q_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(q_handler)
+
+        error_holder: list[str] = []
+
+        def _run_send() -> None:
+            try:
+                be.cmd_send(ns)
+            except SystemExit as exc:
+                if str(exc) != "0":
+                    error_holder.append(f"Send failed (exit {exc}). Check your credentials and CSV path.")
+            except smtplib.SMTPAuthenticationError:
+                error_holder.append(
+                    "SMTP authentication failed. For Gmail, use an App Password "
+                    "(myaccount.google.com/apppasswords)."
+                )
+            except (smtplib.SMTPConnectError, OSError) as exc:
+                error_holder.append(f"Cannot connect to SMTP server {smtp_host}:{smtp_port} – {exc}")
+            except FileNotFoundError as exc:
+                error_holder.append(f"File not found: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                error_holder.append(f"Unexpected error ({type(exc).__name__}): {exc}")
+
+        thread = threading.Thread(target=_run_send, daemon=True)
+        thread.start()
+
+        log_box = st.empty()
+        tick = 0
+        while thread.is_alive():
+            while not log_q.empty():
+                log_lines.append(log_q.get_nowait())
+            log_box.text_area("Log", "\n".join(log_lines[-60:]), height=220, key=f"send_log_{tick}")
+            tick += 1
+            time.sleep(0.4)
+
+        while not log_q.empty():
+            log_lines.append(log_q.get_nowait())
+        root_logger.removeHandler(q_handler)
+
+        log_box.text_area("Log", "\n".join(log_lines[-60:]), height=220, key="send_log_final")
+
+        if error_holder:
+            st.error(error_holder[0])
+        else:
+            label = "Dry-run complete." if dry_run else "Send complete."
+            st.success(f"✅ {label}")
+
+
+# ---------------------------------------------------------------------------
+# Tab: Sent Log
+# ---------------------------------------------------------------------------
+
+def tab_sent_log() -> None:
+    st.header("📑 Sent Log")
+
+    if st.button("🔄 Refresh"):
+        pass  # simply re-render
+
+    df = _read_csv(SENT_LOG_CSV)
+    if df.empty:
+        st.info(f"No sent log found at `{SENT_LOG_CSV}` yet.")
+        return
+
+    st.write(f"**{len(df)} total entries**")
+
+    status_filter = st.selectbox("Filter by status", ["(all)", "sent", "failed"])
+    if status_filter != "(all)" and "status" in df.columns:
+        df = df[df["status"] == status_filter]
+
+    st.dataframe(df, use_container_width=True)
+
+    csv_bytes = df.to_csv(index=False).encode()
+    st.download_button("⬇ Download log", data=csv_bytes, file_name="sent_log.csv", mime="text/csv")
+
+
+# ---------------------------------------------------------------------------
+# Tab: Replies
+# ---------------------------------------------------------------------------
+
+def tab_replies() -> None:
+    st.header("💬 Replies")
+
+    with st.expander("IMAP Settings", expanded=True):
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            imap_host = st.text_input("IMAP Host", value=os.environ.get("IMAP_HOST", "imap.gmail.com"))
+            imap_email = st.text_input("Email Address", value=os.environ.get("EMAIL_ADDRESS", ""),
+                                       key="replies_email")
+        with rc2:
+            imap_port = st.number_input("IMAP Port", value=993, step=1)
+            imap_pass = st.text_input("Password / App Password", type="password",
+                                      value=os.environ.get("EMAIL_PASSWORD", ""), key="replies_pass")
+        folder = st.text_input("Folder", value="INBOX")
+        since_days = st.number_input("Look back (days)", min_value=1, max_value=365, value=30)
+
+    sent_log_path = st.text_input("Sent log CSV (to match replies)", value=SENT_LOG_CSV)
+
+    check_btn = st.button(
+        "🔍 Check for Replies",
+        type="primary",
+        disabled=not (imap_host and imap_email and imap_pass),
+    )
+
+    if check_btn:
+        import argparse
+        import importlib
+        be = importlib.import_module("bulk_emailer")
+
+        ns = argparse.Namespace(
+            imap_host=imap_host,
+            imap_port=int(imap_port),
+            email=imap_email,
+            password=imap_pass,
+            log=sent_log_path,
+            folder=folder,
+            since=int(since_days),
+        )
+
+        lead_replies: list[dict] = []
+        other_msgs: list[dict] = []
+        error_holder: list[str] = []
+
+        import email as email_lib
+        from email.utils import parseaddr
+
+        def _fetch_replies() -> None:
+            try:
+                since_date = (
+                    datetime.now(timezone.utc) - timedelta(days=int(since_days))
+                ).strftime("%d-%b-%Y")
+
+                sent_emails: set[str] = set()
+                if Path(sent_log_path).exists():
+                    with open(sent_log_path, newline="", encoding="utf-8") as fh:
+                        for row in csv.DictReader(fh):
+                            if row.get("status") == "sent":
+                                sent_emails.add(row["to_email"].lower().strip())
+
+                with imaplib.IMAP4_SSL(imap_host, int(imap_port)) as imap:
+                    imap.login(imap_email, imap_pass)
+                    imap.select(folder, readonly=True)
+                    _, data = imap.search(None, f'SINCE "{since_date}"')
+                    msg_ids = data[0].split()
+
+                    for msg_id in msg_ids:
+                        _, msg_data = imap.fetch(msg_id, "(RFC822)")
+                        raw = msg_data[0][1]
+                        if not isinstance(raw, bytes):
+                            continue
+                        parsed = email_lib.message_from_bytes(raw)
+                        fname, faddr = parseaddr(parsed.get("From", ""))
+                        faddr = faddr.lower().strip()
+                        entry = {
+                            "from": faddr,
+                            "name": fname or faddr,
+                            "subject": parsed.get("Subject", "(no subject)"),
+                            "date": parsed.get("Date", ""),
+                        }
+                        if faddr in sent_emails:
+                            lead_replies.append(entry)
+                        else:
+                            other_msgs.append(entry)
+            except imaplib.IMAP4.error as exc:
+                msg = str(exc).lower()
+                if "authenticate" in msg or "login" in msg or "auth" in msg:
+                    error_holder.append(
+                        "IMAP authentication failed. For Gmail, use an App Password "
+                        "(myaccount.google.com/apppasswords)."
+                    )
+                elif "select" in msg or "doesn't exist" in msg:
+                    error_holder.append(f"Folder '{folder}' not found on the server.")
+                else:
+                    error_holder.append(f"IMAP error: {exc}")
+            except (OSError, TimeoutError) as exc:
+                error_holder.append(f"Cannot connect to IMAP server {imap_host}:{imap_port} – {exc}")
+            except Exception as exc:  # noqa: BLE001
+                error_holder.append(f"Unexpected error ({type(exc).__name__}): {exc}")
+
+        with st.spinner("Connecting to IMAP…"):
+            t = threading.Thread(target=_fetch_replies, daemon=True)
+            t.start()
+            t.join(timeout=60)
+
+        if error_holder:
+            st.error(f"IMAP error: {error_holder[0]}")
+            return
+
+        st.subheader(f"Replies from leads ({len(lead_replies)})")
+        if lead_replies:
+            st.dataframe(pd.DataFrame(lead_replies), use_container_width=True)
+        else:
+            st.info("No replies from known leads found.")
+
+        with st.expander(f"Other inbox messages ({len(other_msgs)})"):
+            if other_msgs:
+                st.dataframe(pd.DataFrame(other_msgs), use_container_width=True)
+            else:
+                st.write("None.")
+
+
+# ---------------------------------------------------------------------------
+# Main layout
+# ---------------------------------------------------------------------------
+
+tabs = st.tabs(["🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📑 Sent Log", "💬 Replies"])
+
+with tabs[0]:
+    tab_scrape()
+
+with tabs[1]:
+    tab_leads()
+
+with tabs[2]:
+    tab_send()
+
+with tabs[3]:
+    tab_sent_log()
+
+with tabs[4]:
+    tab_replies()
