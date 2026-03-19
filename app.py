@@ -91,11 +91,213 @@ class _QueueHandler(logging.Handler):
 
 
 # ---------------------------------------------------------------------------
+# Custom CSS / visual polish
+# ---------------------------------------------------------------------------
+
+def _inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        /* ── Global font & background ─────────────────────────────── */
+        html, body, [class*="css"] {
+            font-family: "Inter", "Segoe UI", sans-serif;
+        }
+
+        /* ── Metric cards ─────────────────────────────────────────── */
+        [data-testid="stMetric"] {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 16px 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.06);
+        }
+        [data-testid="stMetric"]:nth-child(1) { border-top: 4px solid #6366f1; }
+        [data-testid="stMetric"]:nth-child(2) { border-top: 4px solid #0ea5e9; }
+        [data-testid="stMetric"]:nth-child(3) { border-top: 4px solid #22c55e; }
+        [data-testid="stMetric"]:nth-child(4) { border-top: 4px solid #f97316; }
+        [data-testid="stMetric"]:nth-child(5) { border-top: 4px solid #a855f7; }
+
+        [data-testid="stMetricLabel"] {
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            color: #6b7280;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.7rem;
+            font-weight: 700;
+            color: #111827;
+        }
+
+        /* ── Tabs ─────────────────────────────────────────────────── */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+            background: #f9fafb;
+            padding: 6px 6px 0;
+            border-radius: 10px 10px 0 0;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 8px 8px 0 0;
+            padding: 8px 18px;
+            font-weight: 500;
+            font-size: 0.85rem;
+            color: #6b7280;
+            background: transparent;
+        }
+        .stTabs [aria-selected="true"] {
+            background: #ffffff !important;
+            color: #6366f1 !important;
+            border-bottom: 3px solid #6366f1;
+            font-weight: 700;
+        }
+
+        /* ── Buttons ─────────────────────────────────────────────── */
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            border: none;
+            border-radius: 8px;
+            padding: 8px 24px;
+            font-weight: 600;
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(99,102,241,.35);
+            transition: all .2s;
+        }
+        .stButton > button[kind="primary"]:hover {
+            filter: brightness(1.1);
+            box-shadow: 0 4px 14px rgba(99,102,241,.5);
+            transform: translateY(-1px);
+        }
+        .stButton > button[kind="secondary"] {
+            border-radius: 8px;
+            font-weight: 500;
+        }
+
+        /* ── Expander ─────────────────────────────────────────────── */
+        [data-testid="stExpander"] {
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        /* ── Success / Error / Warning / Info boxes ───────────────── */
+        [data-testid="stAlert"] {
+            border-radius: 10px;
+        }
+
+        /* ── Sidebar branding ─────────────────────────────────────── */
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+        }
+        [data-testid="stSidebar"] * {
+            color: #e2e8f0 !important;
+        }
+        [data-testid="stSidebar"] hr {
+            border-color: #334155;
+        }
+        [data-testid="stSidebar"] [data-testid="stMetric"] {
+            background: #1e293b;
+            border-color: #334155;
+            border-top-color: #6366f1;
+        }
+        [data-testid="stSidebar"] [data-testid="stMetricValue"] {
+            color: #f8fafc !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+def _render_sidebar() -> None:
+    with st.sidebar:
+        st.markdown(
+            """
+            <div style="text-align:center;padding:8px 0 4px">
+              <div style="font-size:2.2rem">📧</div>
+              <div style="font-size:1.25rem;font-weight:800;letter-spacing:-.02em;
+                          color:#f8fafc;margin-top:4px">Outreach</div>
+              <div style="font-size:0.75rem;color:#94a3b8;margin-top:2px">
+                Lead generation &amp; email outreach
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.divider()
+
+        # Quick stats from disk
+        leads_df = _read_csv(LEADS_CSV)
+        sent_df = _read_csv(SENT_LOG_CSV)
+
+        total_leads = len(leads_df)
+        unique_emails = (
+            leads_df["email"].str.strip().replace("", pd.NA).dropna().nunique()
+            if "email" in leads_df.columns else 0
+        )
+        sent_n = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
+
+        st.caption("📊 QUICK STATS")
+        s1, s2 = st.columns(2)
+        s1.metric("Leads", f"{total_leads:,}")
+        s2.metric("Sent", f"{sent_n:,}")
+        s1.metric("Emails", f"{unique_emails:,}")
+
+        st.divider()
+        st.caption("🗂 TABS")
+        st.markdown(
+            """
+            | Tab | Purpose |
+            |---|---|
+            | 📊 Dashboard | KPIs & charts |
+            | 🔍 Scrape | Collect leads |
+            | 📋 Leads | Browse & filter |
+            | ✉️ Send | Compose emails |
+            | 📑 Sent Log | Track sends |
+            | 💬 Replies | Inbox check |
+            | 🚫 Unsub | Opt-out list |
+            """,
+            unsafe_allow_html=False,
+        )
+
+        st.divider()
+        st.caption("⚡ TIPS")
+        st.info(
+            "Run **Scrape** first to collect leads, then go to **Compose & Send** "
+            "to send outreach emails.",
+            icon="💡",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tab: Dashboard
 # ---------------------------------------------------------------------------
 
 def tab_dashboard() -> None:
-    st.header("📊 Dashboard")
+    # Hero banner
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 60%, #0ea5e9 100%);
+            border-radius: 14px;
+            padding: 28px 32px;
+            margin-bottom: 24px;
+            color: #fff;
+        ">
+            <div style="font-size:1.8rem;font-weight:800;letter-spacing:-.03em;">
+                📊 Outreach Dashboard
+            </div>
+            <div style="font-size:1rem;opacity:.85;margin-top:6px;">
+                Your leads, sends, and results — all in one place.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     leads_df = _read_csv(LEADS_CSV)
     sent_df = _read_csv(SENT_LOG_CSV)
@@ -129,9 +331,9 @@ def tab_dashboard() -> None:
                 score_counts = scores.astype(int).value_counts().sort_index().rename_axis("score").reset_index(name="count")
                 st.bar_chart(score_counts.set_index("score")["count"])
             else:
-                st.info("No lead score data available.")
+                st.info("No lead score data available.", icon="ℹ️")
         else:
-            st.info("Load leads.csv to see score distribution.")
+            st.info("Run the **Scrape** tab first to populate leads.", icon="🔍")
 
     # --- Sends over time ---
     with col_right:
@@ -144,9 +346,9 @@ def tab_dashboard() -> None:
                 daily["date"] = daily["date"].astype(str)
                 st.line_chart(daily.set_index("date")["emails_sent"])
             else:
-                st.info("No successful sends recorded yet.")
+                st.info("No successful sends recorded yet.", icon="✉️")
         else:
-            st.info("No sent log found yet.")
+            st.info("Send some emails via **Compose & Send** to see activity.", icon="✉️")
 
     # --- Category breakdown ---
     if not leads_df.empty and "category" in leads_df.columns:
@@ -171,6 +373,8 @@ def tab_dashboard() -> None:
 
 def tab_unsubscribe() -> None:
     st.header("🚫 Unsubscribe Manager")
+    st.caption("Manage opt-out addresses. These are permanently skipped on every send.")
+    st.divider()
 
     unsub_path = Path(UNSUBSCRIBE_TXT)
 
@@ -244,6 +448,8 @@ def tab_unsubscribe() -> None:
 
 def tab_scrape() -> None:
     st.header("🔍 Scrape Leads")
+    st.caption("Search Google Maps or Bing and extract business contact information automatically.")
+    st.divider()
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -351,19 +557,21 @@ def tab_scrape() -> None:
 
 def tab_leads() -> None:
     st.header("📋 Leads")
+    st.caption("Browse, filter, and download your collected leads.")
+    st.divider()
 
     uploaded = st.file_uploader("Upload a leads CSV", type="csv")
     if uploaded:
         df = pd.read_csv(uploaded, dtype=str).fillna("")
         st.session_state["leads_df"] = df
-        st.success(f"Loaded {len(df)} rows from uploaded file.")
+        st.success(f"Loaded {len(df)} rows from uploaded file.", icon="✅")
     elif Path(LEADS_CSV).exists():
-        if st.button("Load leads.csv from disk"):
+        if st.button("📂 Load leads.csv from disk"):
             st.session_state["leads_df"] = _read_csv(LEADS_CSV)
 
     df: pd.DataFrame = st.session_state.get("leads_df", pd.DataFrame())
     if df.empty:
-        st.info("No leads loaded yet. Upload a CSV or run the scraper first.")
+        st.info("No leads loaded yet. Upload a CSV or run the **Scrape** tab first.", icon="📂")
         return
 
     st.write(f"**{len(df)} total rows**")
@@ -451,8 +659,10 @@ def tab_leads() -> None:
 
 def tab_send() -> None:
     st.header("✉️ Compose & Send")
+    st.caption("Personalise and send outreach emails to your leads via SMTP.")
+    st.divider()
 
-    with st.expander("SMTP Settings", expanded=True):
+    with st.expander("🔐 SMTP Settings", expanded=True):
         sc1, sc2 = st.columns(2)
         with sc1:
             smtp_host = st.text_input("SMTP Host", value=os.environ.get("SMTP_HOST", "smtp.gmail.com"))
@@ -463,13 +673,20 @@ def tab_send() -> None:
                                      value=os.environ.get("EMAIL_PASSWORD", ""))
         use_ssl = st.checkbox("Use SSL (port 465)", value=False)
         from_name = st.text_input("Sender Display Name", value="")
+        st.caption(
+            "💡 **Gmail users:** Enable 2-Step Verification and create an "
+            "[App Password](https://myaccount.google.com/apppasswords). "
+            "Your regular password will not work."
+        )
 
-    with st.expander("Email Content", expanded=True):
-        subject = st.text_input("Subject (use {name}, {url}, etc.)", value="Quick question for {name}")
-        template_body = st.text_area("Email body template", value=_default_template(), height=220)
+    with st.expander("📝 Email Content", expanded=True):
+        subject = st.text_input("Subject line", value="Quick question for {name}",
+                                help="Supports placeholders: {name}, {url}, {phone}, or any CSV column name.")
+        template_body = st.text_area("Email body template", value=_default_template(), height=220,
+                                     help="Use {name}, {url}, {phone} etc. – replaced with values from each lead row.")
         is_html = st.checkbox("HTML email", value=False)
 
-    with st.expander("Sending Options", expanded=False):
+    with st.expander("⚙️ Sending Options", expanded=False):
         leads_csv = st.text_input("Leads CSV path", value=LEADS_CSV)
         sent_log = st.text_input("Sent log CSV path", value=SENT_LOG_CSV)
         unsub_file = st.text_input("Unsubscribe list path", value=UNSUBSCRIBE_TXT)
@@ -572,13 +789,16 @@ def tab_send() -> None:
 
 def tab_sent_log() -> None:
     st.header("📑 Sent Log")
+    st.caption("Track every email send attempt – successes, failures, and trends.")
 
-    if st.button("🔄 Refresh"):
-        pass  # simply re-render
+    col_refresh, _ = st.columns([1, 5])
+    with col_refresh:
+        if st.button("🔄 Refresh"):
+            pass  # simply re-render
 
     df = _read_csv(SENT_LOG_CSV)
     if df.empty:
-        st.info(f"No sent log found at `{SENT_LOG_CSV}` yet.")
+        st.info(f"No sent log found at `{SENT_LOG_CSV}` yet. Send some emails first.", icon="📭")
         return
 
     # --- Summary metrics ---
@@ -608,13 +828,15 @@ def tab_sent_log() -> None:
 
     st.write(f"**{total_n} total entries**")
 
-    status_filter = st.selectbox("Filter by status", ["(all)", "sent", "failed"])
-    if status_filter != "(all)" and "status" in df.columns:
-        df = df[df["status"] == status_filter]
+    status_filter = st.selectbox("Filter by status", ["(all)", "✅ sent", "❌ failed"])
+    filter_val = status_filter.split()[-1] if status_filter != "(all)" else None
+    display_df = df.copy()
+    if filter_val and "status" in display_df.columns:
+        display_df = display_df[display_df["status"] == filter_val]
 
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(display_df, use_container_width=True)
 
-    csv_bytes = df.to_csv(index=False).encode()
+    csv_bytes = display_df.to_csv(index=False).encode()
     st.download_button("⬇ Download log", data=csv_bytes, file_name="sent_log.csv", mime="text/csv")
 
 
@@ -624,8 +846,10 @@ def tab_sent_log() -> None:
 
 def tab_replies() -> None:
     st.header("💬 Replies")
+    st.caption("Connect to your inbox and surface replies from known leads.")
+    st.divider()
 
-    with st.expander("IMAP Settings", expanded=True):
+    with st.expander("🔐 IMAP Settings", expanded=True):
         rc1, rc2 = st.columns(2)
         with rc1:
             imap_host = st.text_input("IMAP Host", value=os.environ.get("IMAP_HOST", "imap.gmail.com"))
@@ -746,6 +970,9 @@ def tab_replies() -> None:
 # ---------------------------------------------------------------------------
 # Main layout
 # ---------------------------------------------------------------------------
+
+_inject_css()
+_render_sidebar()
 
 tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📑 Sent Log", "💬 Replies", "🚫 Unsubscribes"])
 
