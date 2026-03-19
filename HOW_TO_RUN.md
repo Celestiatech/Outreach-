@@ -256,7 +256,27 @@ leads CSV.
 
 ---
 
-## Running the Tests
+## Streamlit Dashboard (app.py)
+
+A browser-based UI that wraps all of the scripts above. Run it with:
+
+```bash
+streamlit run app.py
+```
+
+The dashboard opens automatically in your browser at `http://localhost:8501` and provides seven tabs:
+
+| Tab | What it does |
+|---|---|
+| 📊 **Dashboard** | Key metrics (total leads, emails sent/failed, success rate), lead-score chart, sends-over-time chart, category breakdown |
+| 🔍 **Scrape** | Run the Bing or Google Maps scraper with a live log stream; results preview + CSV download |
+| 📋 **Leads** | Upload or load `leads.csv`; filter by score / category / has-email; score distribution and category charts; download filtered CSV |
+| ✉️ **Compose & Send** | SMTP config, inline template editor, dry-run or real send; live progress log |
+| 📑 **Sent Log** | View `sent_log.csv` with summary metrics (sent, failed, success rate) and a sends-per-day chart |
+| 💬 **Replies** | IMAP inbox check surfacing replies from known leads vs. other messages |
+| 🚫 **Unsubscribes** | View, add, bulk-add, and remove addresses from `unsubscribe.txt` |
+
+
 
 ```bash
 python -m pytest test_google_maps_scraper.py

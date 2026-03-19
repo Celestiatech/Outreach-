@@ -91,6 +91,154 @@ class _QueueHandler(logging.Handler):
 
 
 # ---------------------------------------------------------------------------
+# Tab: Dashboard
+# ---------------------------------------------------------------------------
+
+def tab_dashboard() -> None:
+    st.header("📊 Dashboard")
+
+    leads_df = _read_csv(LEADS_CSV)
+    sent_df = _read_csv(SENT_LOG_CSV)
+
+    # --- KPI row ---
+    k1, k2, k3, k4, k5 = st.columns(5)
+
+    total_leads = len(leads_df)
+    unique_emails = leads_df["email"].str.strip().replace("", pd.NA).dropna().nunique() if "email" in leads_df.columns else 0
+
+    sent_count = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
+    failed_count = int((sent_df["status"] == "failed").sum()) if "status" in sent_df.columns else 0
+    success_rate = f"{sent_count / (sent_count + failed_count) * 100:.0f}%" if (sent_count + failed_count) > 0 else "—"
+
+    k1.metric("Total leads", f"{total_leads:,}")
+    k2.metric("Unique emails", f"{unique_emails:,}")
+    k3.metric("Emails sent", f"{sent_count:,}")
+    k4.metric("Failed sends", f"{failed_count:,}")
+    k5.metric("Success rate", success_rate)
+
+    st.divider()
+
+    col_left, col_right = st.columns(2)
+
+    # --- Lead score distribution ---
+    with col_left:
+        st.subheader("Lead score distribution")
+        if not leads_df.empty and "lead_score" in leads_df.columns:
+            scores = pd.to_numeric(leads_df["lead_score"], errors="coerce").dropna()
+            if not scores.empty:
+                score_counts = scores.astype(int).value_counts().sort_index().rename_axis("score").reset_index(name="count")
+                st.bar_chart(score_counts.set_index("score")["count"])
+            else:
+                st.info("No lead score data available.")
+        else:
+            st.info("Load leads.csv to see score distribution.")
+
+    # --- Sends over time ---
+    with col_right:
+        st.subheader("Sends over time")
+        if not sent_df.empty and "timestamp" in sent_df.columns and "status" in sent_df.columns:
+            sent_only = sent_df[sent_df["status"] == "sent"].copy()
+            if not sent_only.empty:
+                sent_only["date"] = pd.to_datetime(sent_only["timestamp"], errors="coerce", utc=True).dt.date
+                daily = sent_only.groupby("date").size().reset_index(name="emails_sent")
+                daily["date"] = daily["date"].astype(str)
+                st.line_chart(daily.set_index("date")["emails_sent"])
+            else:
+                st.info("No successful sends recorded yet.")
+        else:
+            st.info("No sent log found yet.")
+
+    # --- Category breakdown ---
+    if not leads_df.empty and "category" in leads_df.columns:
+        st.divider()
+        st.subheader("Leads by category")
+        cat_counts = (
+            leads_df["category"]
+            .replace("", pd.NA)
+            .dropna()
+            .value_counts()
+            .head(15)
+            .rename_axis("category")
+            .reset_index(name="count")
+        )
+        if not cat_counts.empty:
+            st.bar_chart(cat_counts.set_index("category")["count"])
+
+
+# ---------------------------------------------------------------------------
+# Tab: Unsubscribe Manager
+# ---------------------------------------------------------------------------
+
+def tab_unsubscribe() -> None:
+    st.header("🚫 Unsubscribe Manager")
+
+    unsub_path = Path(UNSUBSCRIBE_TXT)
+
+    def _load() -> list[str]:
+        if not unsub_path.exists():
+            return []
+        lines = unsub_path.read_text(encoding="utf-8").splitlines()
+        return [ln.strip().lower() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
+    def _save(addresses: list[str]) -> None:
+        unsub_path.write_text("\n".join(sorted(set(addresses))) + "\n", encoding="utf-8")
+
+    addresses = _load()
+    st.write(f"**{len(addresses)} unsubscribed address(es)** in `{UNSUBSCRIBE_TXT}`")
+
+    # --- Add new address ---
+    with st.form("add_unsub", clear_on_submit=True):
+        new_addr = st.text_input("Add email address to unsubscribe list")
+        if st.form_submit_button("➕ Add") and new_addr.strip():
+            addr = new_addr.strip().lower()
+            if addr not in addresses:
+                addresses.append(addr)
+                _save(addresses)
+                st.success(f"Added `{addr}`")
+                st.rerun()
+            else:
+                st.info(f"`{addr}` is already on the list.")
+
+    # --- Bulk-add from CSV column ---
+    with st.expander("Bulk-add from a CSV"):
+        up = st.file_uploader("Upload CSV with an 'email' column", type="csv", key="unsub_upload")
+        if up:
+            bulk_df = pd.read_csv(up, dtype=str).fillna("")
+            if "email" in bulk_df.columns:
+                new_addrs = [e.strip().lower() for e in bulk_df["email"] if e.strip()]
+                before = len(addresses)
+                combined = list(set(addresses) | set(new_addrs))
+                _save(combined)
+                added = len(combined) - before
+                st.success(f"Added {added} new address(es) from CSV.")
+                st.rerun()
+            else:
+                st.error("The CSV must contain an 'email' column.")
+
+    # --- Display and remove ---
+    if addresses:
+        st.subheader("Current list")
+        remove_set: set[str] = set()
+        for addr in sorted(addresses):
+            col_a, col_b = st.columns([5, 1])
+            col_a.write(addr)
+            if col_b.button("✕", key=f"rm_{addr}"):
+                remove_set.add(addr)
+
+        if remove_set:
+            remaining = [a for a in addresses if a not in remove_set]
+            _save(remaining)
+            st.rerun()
+
+        st.divider()
+        if st.button("🗑 Clear entire list", type="secondary"):
+            _save([])
+            st.rerun()
+    else:
+        st.info("No unsubscribed addresses yet.")
+
+
+# ---------------------------------------------------------------------------
 # Tab: Scrape
 # ---------------------------------------------------------------------------
 
@@ -262,6 +410,40 @@ def tab_leads() -> None:
         mime="text/csv",
     )
 
+    # --- Charts ---
+    if not filtered.empty:
+        st.divider()
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+            if "lead_score" in filtered.columns:
+                scores = pd.to_numeric(filtered["lead_score"], errors="coerce").dropna()
+                if not scores.empty:
+                    st.subheader("Score distribution")
+                    score_counts = (
+                        scores.astype(int)
+                        .value_counts()
+                        .sort_index()
+                        .rename_axis("score")
+                        .reset_index(name="count")
+                    )
+                    st.bar_chart(score_counts.set_index("score")["count"])
+
+        with chart_col2:
+            if "category" in filtered.columns:
+                cat_counts = (
+                    filtered["category"]
+                    .replace("", pd.NA)
+                    .dropna()
+                    .value_counts()
+                    .head(10)
+                    .rename_axis("category")
+                    .reset_index(name="count")
+                )
+                if not cat_counts.empty:
+                    st.subheader("Top categories")
+                    st.bar_chart(cat_counts.set_index("category")["count"])
+
 
 # ---------------------------------------------------------------------------
 # Tab: Compose & Send
@@ -399,7 +581,32 @@ def tab_sent_log() -> None:
         st.info(f"No sent log found at `{SENT_LOG_CSV}` yet.")
         return
 
-    st.write(f"**{len(df)} total entries**")
+    # --- Summary metrics ---
+    sent_n = int((df["status"] == "sent").sum()) if "status" in df.columns else 0
+    failed_n = int((df["status"] == "failed").sum()) if "status" in df.columns else 0
+    total_n = len(df)
+    rate = f"{sent_n / total_n * 100:.1f}%" if total_n else "—"
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total entries", f"{total_n:,}")
+    m2.metric("Sent", f"{sent_n:,}")
+    m3.metric("Failed", f"{failed_n:,}")
+    m4.metric("Success rate", rate)
+
+    st.divider()
+
+    # --- Sends over time chart ---
+    if "timestamp" in df.columns and "status" in df.columns:
+        sent_only = df[df["status"] == "sent"].copy()
+        if not sent_only.empty:
+            sent_only["date"] = pd.to_datetime(sent_only["timestamp"], errors="coerce", utc=True).dt.date
+            daily = sent_only.groupby("date").size().reset_index(name="emails_sent")
+            daily["date"] = daily["date"].astype(str)
+            st.subheader("Sends per day")
+            st.line_chart(daily.set_index("date")["emails_sent"])
+            st.divider()
+
+    st.write(f"**{total_n} total entries**")
 
     status_filter = st.selectbox("Filter by status", ["(all)", "sent", "failed"])
     if status_filter != "(all)" and "status" in df.columns:
@@ -540,19 +747,25 @@ def tab_replies() -> None:
 # Main layout
 # ---------------------------------------------------------------------------
 
-tabs = st.tabs(["🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📑 Sent Log", "💬 Replies"])
+tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📑 Sent Log", "💬 Replies", "🚫 Unsubscribes"])
 
 with tabs[0]:
-    tab_scrape()
+    tab_dashboard()
 
 with tabs[1]:
-    tab_leads()
+    tab_scrape()
 
 with tabs[2]:
-    tab_send()
+    tab_leads()
 
 with tabs[3]:
-    tab_sent_log()
+    tab_send()
 
 with tabs[4]:
+    tab_sent_log()
+
+with tabs[5]:
     tab_replies()
+
+with tabs[6]:
+    tab_unsubscribe()
