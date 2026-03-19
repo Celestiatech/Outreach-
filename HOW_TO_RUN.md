@@ -126,6 +126,136 @@ Both scripts produce a CSV file with the following columns:
 
 ---
 
+---
+
+## Bulk Email Sender (`bulk_emailer.py`)
+
+Reads the leads CSV produced by either scraper, sends personalised outreach
+emails via SMTP, logs every send attempt, and can check your inbox for replies.
+
+All three SMTP / IMAP credentials can be supplied as CLI flags **or** as
+environment variables (`SMTP_HOST`, `SMTP_PORT`, `IMAP_HOST`, `IMAP_PORT`,
+`EMAIL_ADDRESS`, `EMAIL_PASSWORD`).
+
+> **Gmail users:** Enable 2-Step Verification, then create an
+> [App Password](https://myaccount.google.com/apppasswords) and use that as
+> the `--password` value. Your regular password will not work.
+
+---
+
+### 1. List all unique emails in a leads file
+
+```bash
+python bulk_emailer.py list --csv leads.csv
+```
+
+---
+
+### 2. Preview emails without sending (dry run)
+
+```bash
+python bulk_emailer.py send \
+    --csv leads.csv \
+    --template email_template.txt \
+    --subject "Quick question for {name}" \
+    --from-name "Alice at Acme" \
+    --smtp-host smtp.gmail.com \
+    --email you@gmail.com \
+    --password "your-app-password" \
+    --dry-run
+```
+
+---
+
+### 3. Send bulk emails
+
+```bash
+python bulk_emailer.py send \
+    --csv leads.csv \
+    --template email_template.txt \
+    --subject "Quick question for {name}" \
+    --from-name "Alice at Acme" \
+    --smtp-host smtp.gmail.com \
+    --email you@gmail.com \
+    --password "your-app-password"
+```
+
+**Send arguments:**
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--csv` | No | `leads.csv` | Leads CSV file |
+| `--template` | Yes | — | Path to email body template (plain text or HTML) |
+| `--subject` | Yes | — | Subject line; supports `{name}`, `{url}`, any CSV column |
+| `--from-name` | No | _(empty)_ | Sender display name |
+| `--smtp-host` | Yes* | `SMTP_HOST` env | SMTP server hostname |
+| `--smtp-port` | No | `587` | SMTP port (587 = STARTTLS, 465 = SSL) |
+| `--ssl` | No | off | Use direct SSL on port 465 instead of STARTTLS |
+| `--email` | Yes* | `EMAIL_ADDRESS` env | Sender email address |
+| `--password` | Yes* | `EMAIL_PASSWORD` env | Email password / app-password |
+| `--log` | No | `sent_log.csv` | Log file; already-sent addresses are skipped on re-runs |
+| `--unsubscribe` | No | `unsubscribe.txt` | One email per line; those addresses are always skipped |
+| `--delay` | No | `2.0` | Seconds between sends |
+| `--html` | No | off | Treat template as HTML |
+| `--dry-run` | No | off | Preview recipients without sending |
+
+*Required unless the matching environment variable is set.
+
+**Template placeholders** – use any column name from the CSV wrapped in
+`{curly braces}`, e.g. `{name}`, `{email}`, `{url}`, `{phone}`. Unknown
+placeholders are left unchanged.
+
+**Tracking & deduplication** – each successful send is written to
+`sent_log.csv`. If you run the script again (e.g. after adding more leads),
+already-sent addresses are automatically skipped.
+
+**Unsubscribes** – add an email address (one per line) to `unsubscribe.txt`
+to permanently exclude it from all future sends.
+
+---
+
+### 4. Check for replies from leads
+
+```bash
+python bulk_emailer.py replies \
+    --imap-host imap.gmail.com \
+    --email you@gmail.com \
+    --password "your-app-password"
+```
+
+Replies are matched against the addresses in `sent_log.csv` so you can see
+at a glance which leads have written back.
+
+**Replies arguments:**
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--imap-host` | Yes* | `IMAP_HOST` env | IMAP server hostname |
+| `--imap-port` | No | `993` | IMAP port |
+| `--email` | Yes* | `EMAIL_ADDRESS` env | Your email address |
+| `--password` | Yes* | `EMAIL_PASSWORD` env | Email password / app-password |
+| `--log` | No | `sent_log.csv` | Sent log used to identify lead replies |
+| `--folder` | No | `INBOX` | IMAP folder to check |
+| `--since` | No | `30` | How many days back to look |
+
+---
+
+### Email template
+
+Edit `email_template.txt` to customise the message body. Placeholders like
+`{name}`, `{url}`, `{phone}` are replaced with values from each row of the
+leads CSV.
+
+**Common SMTP / IMAP settings:**
+
+| Provider | SMTP host | SMTP port | IMAP host | IMAP port |
+|---|---|---|---|---|
+| Gmail | `smtp.gmail.com` | `587` | `imap.gmail.com` | `993` |
+| Outlook / Hotmail | `smtp.office365.com` | `587` | `outlook.office365.com` | `993` |
+| Yahoo Mail | `smtp.mail.yahoo.com` | `587` | `imap.mail.yahoo.com` | `993` |
+
+---
+
 ## Running the Tests
 
 ```bash
