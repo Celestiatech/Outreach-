@@ -371,10 +371,75 @@ def _safe_attr(page, selector: str, attr: str, timeout: int = 5_000) -> str:
         return ""
 
 
-def scrape_google_maps(keyword: str, num_results: int = 50) -> list[dict]:
+def is_qualified_lead(record: dict) -> bool:
+    """
+    Return *True* if *record* is a qualified lead.
+
+    A lead is qualified when at least one meaningful contact channel is
+    present – either an e-mail address or a phone number.
+    """
+    return bool(record.get("email") or record.get("phone"))
+
+
+# Keyword suffixes tried in order when the primary keyword doesn't yield enough
+# qualified leads.  The first entry is the empty string (= original keyword).
+_KEYWORD_VARIANT_SUFFIXES: tuple[str, ...] = (
+    "",
+    " company",
+    " business",
+    " agency",
+    " services",
+    " firm",
+    " consultant",
+    " professionals",
+)
+
+
+def _keyword_variants(keyword: str) -> list[str]:
+    """
+    Return a list of search-query variants for *keyword*.
+
+    The first entry is always *keyword* unchanged; subsequent entries append
+    common business-type suffixes so that retry batches explore slightly
+    different result sets.
+    """
+    seen: set[str] = set()
+    variants: list[str] = []
+    for suffix in _KEYWORD_VARIANT_SUFFIXES:
+        variant = (keyword + suffix).strip()
+        if variant not in seen:
+            seen.add(variant)
+            variants.append(variant)
+    return variants
+
+
+def scrape_google_maps(
+    keyword: str,
+    num_results: int = 50,
+    stop_at_qualified: int | None = None,
+    seen_names: set[str] | None = None,
+) -> list[dict]:
     """
     Search Google Maps for *keyword* and scrape up to *num_results* business
     listings.
+
+    Parameters
+    ----------
+    keyword:
+        Search term passed to Google Maps.
+    num_results:
+        Maximum number of listing URLs to collect from the search results
+        feed before visiting individual pages.
+    stop_at_qualified:
+        When provided, stop visiting listing detail pages as soon as this
+        many *qualified* leads (records with an e-mail or phone) have been
+        collected in the current call.  Useful when driving the scraper from
+        :func:`scrape_until_target`.
+    seen_names:
+        Optional mutable set of ``"name|address"`` keys already collected
+        across batches.  Listings whose key is already in this set are
+        skipped to avoid duplicates.  The set is updated in-place as new
+        listings are processed.
 
     Returns a list of dicts with keys:
     ``keyword``, ``name``, ``address``, ``phone``, ``website``, ``rating``,
@@ -383,6 +448,8 @@ def scrape_google_maps(keyword: str, num_results: int = 50) -> list[dict]:
     """
     records: list[dict] = []
     http_session = _create_session()
+    if seen_names is None:
+        seen_names = set()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -457,6 +524,16 @@ def scrape_google_maps(keyword: str, num_results: int = 50) -> list[dict]:
         logger.info("Found %d listing URL(s). Scraping details…", len(listing_urls))
 
         for idx, listing_url in enumerate(listing_urls, start=1):
+            # Early-stop: we already have enough qualified leads for this batch.
+            if stop_at_qualified is not None:
+                batch_qualified = sum(1 for r in records if is_qualified_lead(r))
+                if batch_qualified >= stop_at_qualified:
+                    logger.info(
+                        "Reached stop_at_qualified=%d after %d listing(s).",
+                        stop_at_qualified, idx - 1,
+                    )
+                    break
+
             logger.info("[%d/%d] %s", idx, len(listing_urls), listing_url)
 
             try:
@@ -499,6 +576,14 @@ def scrape_google_maps(keyword: str, num_results: int = 50) -> list[dict]:
                 address = _safe_text(page, sel, timeout=3_000)
                 if address:
                     break
+
+            # Skip this listing if it has already been collected in a
+            # previous batch (cross-batch deduplication).
+            dedup_key = f"{name.lower()}|{address.lower()}"
+            if dedup_key in seen_names:
+                logger.debug("Skipping duplicate listing: %r", name)
+                continue
+            seen_names.add(dedup_key)
 
             # --- Phone ---
             phone = ""
@@ -634,6 +719,98 @@ def scrape_google_maps(keyword: str, num_results: int = 50) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Retry-until-success: collect at least N qualified leads
+# ---------------------------------------------------------------------------
+
+
+def scrape_until_target(
+    keyword: str,
+    min_leads: int = 50,
+    batch_size: int = 25,
+    max_batches: int = 8,
+) -> list[dict]:
+    """
+    Scrape Google Maps in repeated batches until at least *min_leads*
+    **qualified** leads (records with an e-mail *or* phone number) are
+    collected, or until *max_batches* batches have been attempted.
+
+    Each batch uses a slightly different keyword variant drawn from
+    :func:`_keyword_variants` so that subsequent batches explore a
+    different slice of Google Maps results.  A shared ``seen_names`` set
+    prevents the same business from appearing in the output more than once.
+
+    Parameters
+    ----------
+    keyword:
+        Base search term (e.g. ``"digital agency London"``).
+    min_leads:
+        Minimum number of qualified leads to collect before stopping.
+    batch_size:
+        Number of Google Maps listings to inspect per batch.
+    max_batches:
+        Hard upper limit on the number of batches, regardless of whether
+        *min_leads* has been reached.  Prevents an infinite loop when
+        Google Maps simply does not have enough results.
+
+    Returns
+    -------
+    list[dict]
+        All collected records (not just the qualified subset).  Call
+        :func:`save_to_csv` on the return value to persist the results.
+    """
+    all_records: list[dict] = []
+    seen_names: set[str] = set()
+    variants = _keyword_variants(keyword)
+
+    for batch_num in range(1, max_batches + 1):
+        qualified_so_far = sum(1 for r in all_records if is_qualified_lead(r))
+
+        if qualified_so_far >= min_leads:
+            logger.info(
+                "Target reached: %d qualified lead(s) collected (target: %d).",
+                qualified_so_far, min_leads,
+            )
+            break
+
+        remaining = min_leads - qualified_so_far
+        variant = variants[(batch_num - 1) % len(variants)]
+
+        logger.info(
+            "=== Batch %d/%d | keyword=%r | need %d more qualified lead(s) ===",
+            batch_num, max_batches, variant, remaining,
+        )
+
+        new_records = scrape_google_maps(
+            keyword=variant,
+            num_results=batch_size,
+            stop_at_qualified=remaining,
+            seen_names=seen_names,
+        )
+
+        all_records.extend(new_records)
+
+        qualified_after = sum(1 for r in all_records if is_qualified_lead(r))
+        logger.info(
+            "Batch %d complete: +%d record(s) | %d/%d qualified.",
+            batch_num, len(new_records), qualified_after, min_leads,
+        )
+
+    final_qualified = sum(1 for r in all_records if is_qualified_lead(r))
+    if final_qualified < min_leads:
+        logger.warning(
+            "Could only collect %d qualified lead(s) after %d batch(es) "
+            "(target was %d).  Try a broader keyword.",
+            final_qualified, min(max_batches, len(variants)), min_leads,
+        )
+    else:
+        logger.info(
+            "Success: %d qualified lead(s) collected.", final_qualified
+        )
+
+    return all_records
+
+
+# ---------------------------------------------------------------------------
 # CSV output
 # ---------------------------------------------------------------------------
 
@@ -689,7 +866,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Google Maps Outreach Lead Generator – search Google Maps for a "
             "keyword, visit each listing, extract contact info and social links, "
-            "analyze each site, score each lead, and save to CSV."
+            "analyze each site, score each lead, and save to CSV.\n\n"
+            "By default the scraper runs in retry-until-success mode: it keeps "
+            "scraping in batches until --min-leads qualified leads (records with "
+            "an e-mail or phone) are collected."
         )
     )
     parser.add_argument(
@@ -698,11 +878,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Search keyword or phrase (e.g. 'digital agency London').",
     )
     parser.add_argument(
-        "--results",
+        "--min-leads",
         type=int,
         default=50,
         metavar="N",
-        help="Number of Google Maps listings to inspect (default: 50).",
+        help=(
+            "Minimum number of *qualified* leads (with e-mail or phone) to "
+            "collect before stopping.  The scraper retries with keyword variants "
+            "until this target is reached or --max-batches is exhausted "
+            "(default: 50)."
+        ),
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=25,
+        metavar="N",
+        help="Number of Google Maps listings to inspect per batch (default: 25).",
+    )
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=8,
+        metavar="N",
+        help=(
+            "Maximum number of scraping batches before giving up "
+            "(default: 8).  Each batch uses a slightly different keyword variant."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -717,11 +919,21 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    records = scrape_google_maps(keyword=args.keyword, num_results=args.results)
+    records = scrape_until_target(
+        keyword=args.keyword,
+        min_leads=args.min_leads,
+        batch_size=args.batch_size,
+        max_batches=args.max_batches,
+    )
     if not records:
         logger.warning("No records collected – nothing to save.")
         return
     save_to_csv(records, args.output)
+    qualified = sum(1 for r in records if is_qualified_lead(r))
+    logger.info(
+        "Done. %d total row(s) saved (%d qualified lead(s)).",
+        len(records), qualified,
+    )
 
 
 if __name__ == "__main__":

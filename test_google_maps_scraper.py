@@ -803,20 +803,209 @@ class TestArgParser(unittest.TestCase):
         parser = gms.build_arg_parser()
         args = parser.parse_args(["--keyword", "test query"])
         self.assertEqual(args.keyword, "test query")
-        self.assertEqual(args.results, 50)
+        self.assertEqual(args.min_leads, 50)
+        self.assertEqual(args.batch_size, 25)
+        self.assertEqual(args.max_batches, 8)
         self.assertEqual(args.output, "leads.csv")
 
     def test_custom_args(self):
         parser = gms.build_arg_parser()
         args = parser.parse_args([
             "--keyword", "restaurants NYC",
-            "--results", "100",
+            "--min-leads", "100",
+            "--batch-size", "30",
+            "--max-batches", "5",
             "--output", "nyc_leads.csv",
         ])
         self.assertEqual(args.keyword, "restaurants NYC")
-        self.assertEqual(args.results, 100)
+        self.assertEqual(args.min_leads, 100)
+        self.assertEqual(args.batch_size, 30)
+        self.assertEqual(args.max_batches, 5)
         self.assertEqual(args.output, "nyc_leads.csv")
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# is_qualified_lead
+# ---------------------------------------------------------------------------
+
+class TestIsQualifiedLead(unittest.TestCase):
+
+    def test_email_makes_qualified(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "a@b.com", "phone": ""}))
+
+    def test_phone_makes_qualified(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "", "phone": "+441234567890"}))
+
+    def test_both_email_and_phone_qualified(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "a@b.com", "phone": "+441234567890"}))
+
+    def test_no_contact_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({"email": "", "phone": ""}))
+
+    def test_empty_dict_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({}))
+
+    def test_none_values_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({"email": None, "phone": None}))
+
+
+# ---------------------------------------------------------------------------
+# _keyword_variants
+# ---------------------------------------------------------------------------
+
+class TestKeywordVariants(unittest.TestCase):
+
+    def test_first_variant_is_original(self):
+        variants = gms._keyword_variants("web design")
+        self.assertEqual(variants[0], "web design")
+
+    def test_no_duplicates(self):
+        variants = gms._keyword_variants("agency")
+        self.assertEqual(len(variants), len(set(variants)))
+
+    def test_all_contain_keyword(self):
+        variants = gms._keyword_variants("plumber")
+        for v in variants:
+            self.assertIn("plumber", v)
+
+    def test_multiple_variants_generated(self):
+        variants = gms._keyword_variants("marketing firm")
+        self.assertGreater(len(variants), 1)
+
+
+# ---------------------------------------------------------------------------
+# scrape_until_target
+# ---------------------------------------------------------------------------
+
+class TestScrapeUntilTarget(unittest.TestCase):
+    """
+    Verify retry-until-success logic using a mocked scrape_google_maps.
+    """
+
+    def _make_qualified_records(self, count: int, keyword: str = "kw") -> list[dict]:
+        """Return *count* records that each have a phone number (qualified)."""
+        return [
+            {
+                "keyword": keyword, "name": f"Biz {i}", "address": f"{i} St",
+                "phone": f"+44{i:010d}", "website": "", "rating": "", "reviews": "",
+                "category": "", "email": "", "linkedin": "", "twitter": "",
+                "facebook": "", "instagram": "", "contact_page": "", "issues": "",
+                "lead_score": 2,
+            }
+            for i in range(count)
+        ]
+
+    def _make_unqualified_records(self, count: int) -> list[dict]:
+        """Return *count* records with no email or phone (unqualified)."""
+        return [
+            {
+                "keyword": "kw", "name": f"NoBiz {i}", "address": f"{i} Road",
+                "phone": "", "website": "", "rating": "", "reviews": "",
+                "category": "", "email": "", "linkedin": "", "twitter": "",
+                "facebook": "", "instagram": "", "contact_page": "", "issues": "",
+                "lead_score": 0,
+            }
+            for i in range(count)
+        ]
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_stops_when_target_reached_in_first_batch(self, mock_scrape):
+        """If the first batch already yields enough qualified leads, stop."""
+        mock_scrape.return_value = self._make_qualified_records(50)
+
+        records = gms.scrape_until_target("test", min_leads=50, batch_size=25, max_batches=8)
+
+        # Should have stopped after one call
+        mock_scrape.assert_called_once()
+        qualified = sum(1 for r in records if gms.is_qualified_lead(r))
+        self.assertGreaterEqual(qualified, 50)
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_retries_until_target_met(self, mock_scrape):
+        """Needs two batches of 25 qualified leads each to reach 50."""
+        mock_scrape.side_effect = [
+            self._make_qualified_records(25),  # batch 1: 25 qualified
+            self._make_qualified_records(25),  # batch 2: 25 more → total 50
+        ]
+
+        records = gms.scrape_until_target("test", min_leads=50, batch_size=25, max_batches=8)
+
+        self.assertEqual(mock_scrape.call_count, 2)
+        qualified = sum(1 for r in records if gms.is_qualified_lead(r))
+        self.assertGreaterEqual(qualified, 50)
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_stops_after_max_batches(self, mock_scrape):
+        """Stops after max_batches even if target not reached."""
+        # Each batch returns only 5 qualified leads (never reaches 50)
+        mock_scrape.side_effect = [self._make_qualified_records(5)] * 10
+
+        records = gms.scrape_until_target("test", min_leads=50, batch_size=25, max_batches=4)
+
+        self.assertEqual(mock_scrape.call_count, 4)
+        qualified = sum(1 for r in records if gms.is_qualified_lead(r))
+        # 4 batches × 5 = 20 qualified, which is less than 50
+        self.assertEqual(qualified, 20)
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_uses_keyword_variants(self, mock_scrape):
+        """Different keyword variants are passed to successive batches."""
+        mock_scrape.return_value = []  # never reaches target
+
+        gms.scrape_until_target("agency", min_leads=10, batch_size=5, max_batches=3)
+
+        keywords_used = [call.kwargs["keyword"] for call in mock_scrape.call_args_list]
+        # At least the first call must use the base keyword
+        self.assertEqual(keywords_used[0], "agency")
+        # All variants must contain the base keyword
+        for kw in keywords_used:
+            self.assertIn("agency", kw)
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_deduplicates_across_batches(self, mock_scrape):
+        """
+        Listings with the same name+address from different batches should not
+        be counted twice.  The seen_names set is shared between batches.
+        """
+        # Both batches return the exact same 10 records (same name/address)
+        identical = self._make_qualified_records(10)
+        mock_scrape.side_effect = [identical, identical]
+
+        records = gms.scrape_until_target("dup", min_leads=50, batch_size=10, max_batches=2)
+
+        # Because the second batch has identical name/address it will be
+        # *skipped* inside scrape_google_maps (seen_names filtering).
+        # The total qualified from both batches = 10, not 20.
+        # (We verify that seen_names was passed and reused.)
+        seen_names_arg_batch2 = mock_scrape.call_args_list[1].kwargs.get("seen_names")
+        self.assertIsNotNone(seen_names_arg_batch2)
+        # The seen_names set should be the same object (shared)
+        seen_names_arg_batch1 = mock_scrape.call_args_list[0].kwargs.get("seen_names")
+        self.assertIs(seen_names_arg_batch1, seen_names_arg_batch2)
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_mixes_qualified_and_unqualified(self, mock_scrape):
+        """Unqualified leads are retained in output but don't count toward target."""
+        # 10 unqualified + 50 qualified → target reached
+        mock_scrape.side_effect = [
+            self._make_unqualified_records(10) + self._make_qualified_records(50)
+        ]
+
+        records = gms.scrape_until_target("test", min_leads=50, batch_size=60, max_batches=4)
+
+        qualified = sum(1 for r in records if gms.is_qualified_lead(r))
+        self.assertGreaterEqual(qualified, 50)
+        # Unqualified records are still in the output
+        self.assertEqual(len(records), 60)
+
+    @patch("google_maps_scraper.scrape_google_maps")
+    def test_empty_results_exhausts_batches(self, mock_scrape):
+        """When every batch returns nothing, stop after max_batches."""
+        mock_scrape.return_value = []
+
+        records = gms.scrape_until_target("ghost", min_leads=50, batch_size=25, max_batches=3)
+
+        self.assertEqual(mock_scrape.call_count, 3)
+        self.assertEqual(records, [])
+if __name__ == '__main__':
     unittest.main(verbosity=2)
