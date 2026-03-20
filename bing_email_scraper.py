@@ -88,6 +88,7 @@ MAX_REDIRECTS = 5
 # Lead scoring weights
 SCORE_HAS_EMAIL = 3
 SCORE_HAS_PHONE = 2
+SCORE_HAS_WHATSAPP = 3    # WhatsApp = direct, fast channel → highest priority contact
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1      # Twitter / Facebook / Instagram combined
 SCORE_PER_ISSUE = -1      # deducted for every detected issue (contact-quality signal)
@@ -177,6 +178,12 @@ _NICHE_MAP: tuple[tuple[str, str], ...] = (
     ("studio", "studio"),
 )
 
+# Stop words excluded when deriving a fallback niche label from a keyword.
+_NICHE_STOP_WORDS: frozenset[str] = frozenset({
+    "need", "hire", "help", "find", "want", "looking", "asap", "urgently",
+    "immediately", "required", "requirement",
+})
+
 
 def _keyword_to_niche(keyword: str) -> str:
     """
@@ -190,12 +197,45 @@ def _keyword_to_niche(keyword: str) -> str:
         if fragment in kw_lower:
             return label
     # Fall back: first word longer than 3 chars that isn't a stop word.
-    _STOP = {"need", "hire", "help", "find", "want", "looking", "asap", "urgently",
-              "immediately", "required", "requirement"}
     for word in kw_lower.split():
-        if len(word) > 3 and word not in _STOP:
+        if len(word) > 3 and word not in _NICHE_STOP_WORDS:
             return word
     return keyword
+
+# WhatsApp number regex – matches wa.me links, api.whatsapp.com links, and
+# general phone numbers in international format.
+_WA_LINK_RE = re.compile(r'wa\.me/(\d+)', re.I)
+_WA_API_RE = re.compile(r'api\.whatsapp\.com/send\?phone=(\d+)', re.I)
+_PHONE_DIGITS_RE = re.compile(r'\+?\d[\d\s\-]{8,15}')
+
+
+def extract_whatsapp(html: str) -> str:
+    """
+    Return the first WhatsApp-reachable number found in *html*, or ``""``.
+
+    Detection order (most → least reliable):
+    1. ``wa.me/<number>`` links
+    2. ``api.whatsapp.com/send?phone=<number>`` links
+    3. General phone-number pattern (10–15 digits after stripping non-digits)
+
+    The returned value is always digits-only (no spaces, dashes, or ``+``).
+    """
+    numbers: list[str] = []
+
+    # 1 – wa.me links
+    numbers.extend(_WA_LINK_RE.findall(html))
+
+    # 2 – api.whatsapp.com links
+    numbers.extend(_WA_API_RE.findall(html))
+
+    # 3 – general phone numbers
+    for raw in _PHONE_DIGITS_RE.findall(html):
+        clean = re.sub(r"\D", "", raw)
+        if 10 <= len(clean) <= 15:
+            numbers.append(clean)
+
+    return numbers[0] if numbers else ""
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -473,6 +513,7 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
         "emails": set(),
         "title": "",
         "phone": "",
+        "whatsapp_number": "",
         "linkedin": "",
         "twitter": "",
         "facebook": "",
@@ -516,6 +557,9 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
     # --- Phone ---
     result["phone"] = _extract_phone(soup)
 
+    # --- WhatsApp ---
+    result["whatsapp_number"] = extract_whatsapp(html)
+
     # --- Social media links ---
     result.update(_extract_social_links(soup))
 
@@ -526,7 +570,7 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
     # --- Website analysis ---
     result["issues"] = analyze_website(url, html, response_time=response_time)
 
-    # --- Visit contact page to find additional emails ---
+    # --- Visit contact page to find additional emails / WhatsApp ---
     if contact_url and contact_url != url:
         logger.info("Visiting contact page: %s", contact_url)
         try:
@@ -539,6 +583,9 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
             # Prefer phone from contact page if homepage had none.
             if not result["phone"]:
                 result["phone"] = _extract_phone(contact_soup)
+            # Prefer WhatsApp from contact page if homepage had none.
+            if not result["whatsapp_number"]:
+                result["whatsapp_number"] = extract_whatsapp(contact_resp.text)
         except requests.RequestException as exc:
             logger.warning("Could not fetch contact page %s – %s", contact_url, exc)
 
@@ -558,6 +605,7 @@ def score_lead(data: dict) -> int:
 
     * ``+3`` if at least one email address was found
     * ``+2`` if a phone number was found
+    * ``+3`` if a WhatsApp number was found (direct, high-conversion channel)
     * ``+1`` if a LinkedIn profile was found
     * ``+1`` if any other social media link was found
     * ``-1`` for each issue detected by :func:`analyze_website`
@@ -577,6 +625,8 @@ def score_lead(data: dict) -> int:
         score += SCORE_HAS_EMAIL
     if data.get("phone"):
         score += SCORE_HAS_PHONE
+    if data.get("whatsapp_number"):
+        score += SCORE_HAS_WHATSAPP
     if data.get("linkedin"):
         score += SCORE_HAS_LINKEDIN
     if any(data.get(p) for p in ("twitter", "facebook", "instagram")):
@@ -694,6 +744,7 @@ def scrape(keyword: str, num_results: int = 10) -> list[dict]:
 
         issues_str = "; ".join(data["issues"]) if data["issues"] else ""
         niche = _keyword_to_niche(keyword)
+        whatsapp = data.get("whatsapp_number", "")
         base = {
             "source": "Bing",
             "keyword": keyword,
@@ -701,6 +752,8 @@ def scrape(keyword: str, num_results: int = 10) -> list[dict]:
             "url": url,
             "title": data["title"],
             "phone": data["phone"],
+            "whatsapp_number": whatsapp,
+            "has_whatsapp": "true" if whatsapp else "false",
             "linkedin": data["linkedin"],
             "twitter": data["twitter"],
             "facebook": data["facebook"],
@@ -762,6 +815,7 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
 
     fieldnames = [
         "source", "keyword", "niche", "url", "title", "email", "phone",
+        "whatsapp_number", "has_whatsapp",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
     ]

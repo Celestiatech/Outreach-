@@ -79,6 +79,7 @@ PHONE_REGEX = re.compile(
 SCORE_HAS_EMAIL = 3
 SCORE_HAS_PHONE = 2
 SCORE_HAS_WEBSITE = 1
+SCORE_HAS_WHATSAPP = 3    # WhatsApp = direct, high-conversion channel
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1
 SCORE_PER_ISSUE = -1
@@ -144,6 +145,40 @@ def _extract_city(address: str) -> str:
         return ""
     parts = [p.strip() for p in address.split(",") if p.strip()]
     return parts[1] if len(parts) > 1 else ""
+
+
+# WhatsApp extraction regexes.
+_WA_LINK_RE = re.compile(r'wa\.me/(\d+)', re.I)
+_WA_API_RE = re.compile(r'api\.whatsapp\.com/send\?phone=(\d+)', re.I)
+_PHONE_DIGITS_RE = re.compile(r'\+?\d[\d\s\-]{8,15}')
+
+
+def extract_whatsapp(html: str) -> str:
+    """
+    Return the first WhatsApp-reachable number found in *html*, or ``""``.
+
+    Detection order (most → least reliable):
+    1. ``wa.me/<number>`` links
+    2. ``api.whatsapp.com/send?phone=<number>`` links
+    3. General phone-number pattern (10–15 digits after stripping non-digits)
+
+    The returned value is always digits-only.
+    """
+    numbers: list[str] = []
+
+    # 1 – wa.me links
+    numbers.extend(_WA_LINK_RE.findall(html))
+
+    # 2 – api.whatsapp.com links
+    numbers.extend(_WA_API_RE.findall(html))
+
+    # 3 – general phone numbers
+    for raw in _PHONE_DIGITS_RE.findall(html):
+        clean = re.sub(r"\D", "", raw)
+        if 10 <= len(clean) <= 15:
+            numbers.append(clean)
+
+    return numbers[0] if numbers else ""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -357,6 +392,7 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
     result: dict = {
         "emails": set(),
         "phone": "",
+        "whatsapp_number": "",
         "linkedin": "",
         "twitter": "",
         "facebook": "",
@@ -388,6 +424,7 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
 
     result["emails"] = _extract_emails_from_soup(soup)
     result["phone"] = _extract_phone_from_soup(soup)
+    result["whatsapp_number"] = extract_whatsapp(html)
     result.update(_extract_social_links(soup))
 
     contact_url = _find_contact_page_url(url, soup)
@@ -405,6 +442,9 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
             result["emails"].update(_extract_emails_from_soup(contact_soup))
             if not result["phone"]:
                 result["phone"] = _extract_phone_from_soup(contact_soup)
+            # Prefer WhatsApp from contact page if homepage had none.
+            if not result["whatsapp_number"]:
+                result["whatsapp_number"] = extract_whatsapp(contact_resp.text)
         except requests.RequestException as exc:
             logger.warning("Could not fetch contact page %s – %s", contact_url, exc)
 
@@ -422,6 +462,7 @@ def score_lead(data: dict) -> int:
 
     * ``+3`` if at least one email address was found
     * ``+2`` if a phone number was found
+    * ``+3`` if a WhatsApp number was found (direct, high-conversion channel)
     * ``+1`` if a website is listed on Google Maps
     * ``+1`` if a LinkedIn profile was found
     * ``+1`` if any other social media link was found
@@ -432,6 +473,8 @@ def score_lead(data: dict) -> int:
         score += SCORE_HAS_EMAIL
     if data.get("phone"):
         score += SCORE_HAS_PHONE
+    if data.get("whatsapp_number"):
+        score += SCORE_HAS_WHATSAPP
     if data.get("website"):
         score += SCORE_HAS_WEBSITE
     if data.get("linkedin"):
@@ -472,9 +515,9 @@ def is_qualified_lead(record: dict) -> bool:
     Return *True* if *record* is a qualified lead.
 
     A lead is qualified when at least one meaningful contact channel is
-    present – either an e-mail address or a phone number.
+    present – an e-mail address, a phone number, or a WhatsApp number.
     """
-    return bool(record.get("email") or record.get("phone"))
+    return bool(record.get("email") or record.get("phone") or record.get("whatsapp_number"))
 
 
 # Keyword suffixes tried in order when the primary keyword doesn't yield enough
@@ -740,6 +783,7 @@ def scrape_google_maps(
             enrichment: dict = {
                 "emails": set(),
                 "phone_web": "",
+                "whatsapp_number": "",
                 "linkedin": "",
                 "twitter": "",
                 "facebook": "",
@@ -752,6 +796,7 @@ def scrape_google_maps(
                 raw = enrich_from_website(website, http_session)
                 enrichment["emails"] = raw["emails"]
                 enrichment["phone_web"] = raw["phone"]
+                enrichment["whatsapp_number"] = raw["whatsapp_number"]
                 enrichment["linkedin"] = raw["linkedin"]
                 enrichment["twitter"] = raw["twitter"]
                 enrichment["facebook"] = raw["facebook"]
@@ -765,6 +810,7 @@ def scrape_google_maps(
             lead_data = {
                 "website": website,
                 "phone": final_phone,
+                "whatsapp_number": enrichment["whatsapp_number"],
                 "emails": enrichment["emails"],
                 "linkedin": enrichment["linkedin"],
                 "twitter": enrichment["twitter"],
@@ -778,6 +824,7 @@ def scrape_google_maps(
                 + _urgency_bonus(keyword, name)
             )
 
+            wa = enrichment["whatsapp_number"]
             base = {
                 "source": "Google Maps",
                 "keyword": keyword,
@@ -786,6 +833,8 @@ def scrape_google_maps(
                 "name": name,
                 "address": address,
                 "phone": final_phone,
+                "whatsapp_number": wa,
+                "has_whatsapp": "true" if wa else "false",
                 "website": website,
                 "rating": rating,
                 "reviews": reviews,
@@ -945,7 +994,8 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "source", "keyword", "niche", "city", "name", "address", "phone", "website",
+        "source", "keyword", "niche", "city", "name", "address", "phone",
+        "whatsapp_number", "has_whatsapp", "website",
         "rating", "reviews", "category", "email",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",

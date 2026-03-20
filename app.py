@@ -104,11 +104,13 @@ PROOF_EXAMPLES: list[str] = [
 
 BING_FIELDNAMES = [
     "source", "keyword", "niche", "url", "title", "email", "phone",
+    "whatsapp_number", "has_whatsapp",
     "linkedin", "twitter", "facebook", "instagram",
     "contact_page", "issues", "lead_score",
 ]
 MAPS_FIELDNAMES = [
-    "source", "keyword", "niche", "city", "name", "address", "phone", "website",
+    "source", "keyword", "niche", "city", "name", "address", "phone",
+    "whatsapp_number", "has_whatsapp", "website",
     "rating", "reviews", "category", "email", "linkedin", "twitter", "facebook",
     "instagram", "contact_page", "issues", "lead_score",
 ]
@@ -1007,9 +1009,10 @@ def tab_leads() -> None:
 
     # Filters
     with st.expander("Filters", expanded=True):
-        fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+        fcol1, fcol2, fcol3, fcol4, fcol5 = st.columns(5)
         with fcol1:
             has_email = st.checkbox("Only rows with email", value=False)
+            only_whatsapp = st.checkbox("📱 Only WhatsApp leads", value=False)
         with fcol2:
             min_score: int = 0
             if "lead_score" in df.columns:
@@ -1037,10 +1040,15 @@ def tab_leads() -> None:
                     "🧊 Cold: score < 4 — limited contact info or few opportunity signals."
                 ),
             )
+        with fcol5:
+            wa_sort_first = st.checkbox("🔥 Sort WhatsApp first", value=False,
+                                        help="Move all leads with a WhatsApp number to the top.")
 
     filtered = df.copy()
     if has_email and "email" in filtered.columns:
         filtered = filtered[filtered["email"].str.strip() != ""]
+    if only_whatsapp and "whatsapp_number" in filtered.columns:
+        filtered = filtered[filtered["whatsapp_number"].str.strip() != ""]
     if "lead_score" in filtered.columns and min_score:
         filtered = filtered[pd.to_numeric(filtered["lead_score"], errors="coerce").fillna(0) >= min_score]
     if category_col and category_filter and category_filter != "(all)":
@@ -1054,14 +1062,21 @@ def tab_leads() -> None:
         elif "Cold" in tier_filter:
             filtered = filtered[_numeric_score < 4]
 
-    # Default: sort by lead score descending so best leads appear first.
-    if "lead_score" in filtered.columns:
+    # Sort: WhatsApp-first (optional) then by lead score descending.
+    if not filtered.empty and "lead_score" in filtered.columns:
         filtered = filtered.copy()
         filtered["_sort_score"] = pd.to_numeric(filtered["lead_score"], errors="coerce").fillna(0)
-        filtered = filtered.sort_values("_sort_score", ascending=False).drop(columns=["_sort_score"])
+        if wa_sort_first and "whatsapp_number" in filtered.columns:
+            filtered["_has_wa"] = (filtered["whatsapp_number"].str.strip() != "").astype(int)
+            filtered = filtered.sort_values(
+                ["_has_wa", "_sort_score"], ascending=[False, False]
+            ).drop(columns=["_has_wa", "_sort_score"])
+        else:
+            filtered = filtered.sort_values("_sort_score", ascending=False).drop(columns=["_sort_score"])
 
-    # Tier badge shown inline
+    # Tier + WhatsApp badge summary
     tier_counts: dict = {}
+    wa_count = 0
     if "lead_score" in df.columns:
         all_scores = pd.to_numeric(df["lead_score"], errors="coerce").fillna(0)
         tier_counts = {
@@ -1069,8 +1084,12 @@ def tab_leads() -> None:
             "🟡 Warm": int(((all_scores >= 4) & (all_scores < 7)).sum()),
             "🧊 Cold": int((all_scores < 4).sum()),
         }
+    if "whatsapp_number" in df.columns:
+        wa_count = int((df["whatsapp_number"].str.strip() != "").sum())
     if tier_counts:
         badges = "  ·  ".join(f"{t} **{c:,}**" for t, c in tier_counts.items())
+        if wa_count:
+            badges += f"  ·  📱 WhatsApp **{wa_count:,}**"
         st.caption(f"Tier breakdown: {badges}")
 
     st.write(f"**{len(filtered)} rows after filters**")
@@ -1080,16 +1099,28 @@ def tab_leads() -> None:
         filtered = filtered.copy()
         filtered["notes"] = ""
 
+    # Build click-to-chat WhatsApp URL column if numbers are present
+    if "whatsapp_number" in filtered.columns:
+        filtered = filtered.copy()
+        filtered["whatsapp_chat"] = filtered["whatsapp_number"].apply(
+            lambda n: f"https://wa.me/{n}" if str(n).strip() else ""
+        )
+
     # Column config for richer display
     col_cfg: dict = {
         "notes": st.column_config.TextColumn("📝 Notes", width="medium"),
         "lead_score": st.column_config.NumberColumn("⭐ Score"),
         "issues": st.column_config.TextColumn("⚠️ Issues", width="large"),
+        "whatsapp_number": st.column_config.TextColumn("📱 WhatsApp"),
     }
     if "url" in filtered.columns:
         col_cfg["url"] = st.column_config.LinkColumn("🔗 URL", display_text="Visit")
     if "website" in filtered.columns:
         col_cfg["website"] = st.column_config.LinkColumn("🌐 Website", display_text="Visit")
+    if "whatsapp_chat" in filtered.columns:
+        col_cfg["whatsapp_chat"] = st.column_config.LinkColumn(
+            "💬 Chat on WhatsApp", display_text="Open chat"
+        )
 
     edited_df = st.data_editor(
         filtered,
@@ -1173,9 +1204,20 @@ def _pre_substitute(template: str, static_values: dict[str, str]) -> str:
     """
     Replace a fixed set of placeholder keys in *template* with *static_values*.
 
+    This implements a two-stage substitution strategy:
+
+    1. **Static stage** (this function) – replaces operator-level copy that is
+       the same for every recipient in a send batch: ``{offer}``, ``{cta}``,
+       ``{proof}``, and ``{booking_url}``.  These are chosen once in the UI,
+       not per row.
+
+    2. **Dynamic stage** (``bulk_emailer._render_template``) – replaces
+       per-row placeholders such as ``{name}``, ``{url}``, ``{issues}``,
+       ``{niche}``, and ``{city}`` at send time using values from the leads CSV.
+
     Only keys present in *static_values* are replaced — per-row placeholders
-    like ``{name}``, ``{url}``, ``{issues}`` are left intact for
-    :func:`bulk_emailer._render_template` to resolve at send time.
+    are left verbatim (e.g. ``{name}`` stays as-is) so that
+    :func:`bulk_emailer._render_template` can fill them at send time.
     """
     import string
     formatter = string.Formatter()

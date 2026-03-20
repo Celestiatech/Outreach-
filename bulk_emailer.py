@@ -142,9 +142,7 @@ def _append_sent_log(log_path: str, record: dict) -> None:
         writer = csv.DictWriter(fh, fieldnames=SENT_LOG_FIELDNAMES, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
-        full_record = {f: "" for f in SENT_LOG_FIELDNAMES}
-        full_record.update(record)
-        writer.writerow(full_record)
+        writer.writerow({**{f: "" for f in SENT_LOG_FIELDNAMES}, **record})
 
 
 def _get_display_name(row: dict) -> str:

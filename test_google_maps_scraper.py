@@ -435,7 +435,130 @@ class TestExtractCity(unittest.TestCase):
         self.assertEqual(gms._extract_city("100 Park Ave, New York, NY 10001"), "New York")
 
 
+# ---------------------------------------------------------------------------
+# extract_whatsapp
+# ---------------------------------------------------------------------------
 
+class TestExtractWhatsapp(unittest.TestCase):
+
+    def test_wa_me_link(self):
+        html = '<a href="https://wa.me/447911123456">Chat on WhatsApp</a>'
+        self.assertEqual(gms.extract_whatsapp(html), "447911123456")
+
+    def test_api_whatsapp_link(self):
+        html = '<a href="https://api.whatsapp.com/send?phone=447911123456">Message us</a>'
+        self.assertEqual(gms.extract_whatsapp(html), "447911123456")
+
+    def test_wa_me_preferred_over_phone(self):
+        html = (
+            '<a href="https://wa.me/447911000001">WhatsApp</a>'
+            '<p>Call us on +44 1234 567890</p>'
+        )
+        # wa.me number should come first
+        self.assertEqual(gms.extract_whatsapp(html), "447911000001")
+
+    def test_general_phone_fallback(self):
+        html = "<p>Call us on +44 7911 123456 today.</p>"
+        result = gms.extract_whatsapp(html)
+        self.assertTrue(len(result) >= 10)
+        self.assertTrue(result.isdigit())
+
+    def test_no_number_returns_empty(self):
+        self.assertEqual(gms.extract_whatsapp("<p>No contact here.</p>"), "")
+
+    def test_returns_digits_only(self):
+        html = '<a href="https://wa.me/44-791-1123456">WA</a>'
+        result = gms.extract_whatsapp(html)
+        self.assertTrue(result.isdigit() or result == "")
+
+    def test_short_number_ignored(self):
+        # 5-digit number – too short, should not be returned via phone path
+        html = "<p>Call 12345</p>"
+        result = gms.extract_whatsapp(html)
+        # No wa.me / api link, and 12345 has only 5 digits (<10) so should be ""
+        self.assertEqual(result, "")
+
+
+# ---------------------------------------------------------------------------
+# score_lead – WhatsApp bonus
+# ---------------------------------------------------------------------------
+
+class TestScoreLeadWhatsApp(unittest.TestCase):
+
+    def test_whatsapp_adds_three(self):
+        data = {
+            "emails": set(),
+            "phone": "",
+            "whatsapp_number": "447911123456",
+            "website": "",
+            "linkedin": "",
+            "twitter": "",
+            "facebook": "",
+            "instagram": "",
+            "issues": [],
+        }
+        self.assertEqual(gms.score_lead(data), gms.SCORE_HAS_WHATSAPP)
+
+    def test_whatsapp_stacks_with_email_and_phone(self):
+        data = {
+            "emails": {"a@b.com"},
+            "phone": "+44123",
+            "whatsapp_number": "447911123456",
+            "website": "",
+            "linkedin": "",
+            "twitter": "",
+            "facebook": "",
+            "instagram": "",
+            "issues": [],
+        }
+        # 3 (email) + 2 (phone) + 3 (WhatsApp) = 8
+        self.assertEqual(
+            gms.score_lead(data),
+            gms.SCORE_HAS_EMAIL + gms.SCORE_HAS_PHONE + gms.SCORE_HAS_WHATSAPP,
+        )
+
+    def test_no_whatsapp_no_bonus(self):
+        data = {
+            "emails": set(),
+            "phone": "",
+            "whatsapp_number": "",
+            "website": "",
+            "linkedin": "",
+            "twitter": "",
+            "facebook": "",
+            "instagram": "",
+            "issues": [],
+        }
+        self.assertEqual(gms.score_lead(data), 0)
+
+
+# ---------------------------------------------------------------------------
+# is_qualified_lead – now includes WhatsApp
+# ---------------------------------------------------------------------------
+
+class TestIsQualifiedLead(unittest.TestCase):
+
+    def test_email_qualifies(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "a@b.com", "phone": ""}))
+
+    def test_phone_qualifies(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "", "phone": "+44123"}))
+
+    def test_whatsapp_qualifies(self):
+        self.assertTrue(gms.is_qualified_lead(
+            {"email": "", "phone": "", "whatsapp_number": "447911123456"}
+        ))
+
+    def test_empty_record_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({"email": "", "phone": "", "whatsapp_number": ""}))
+
+    def test_missing_keys_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({}))
+
+
+# ---------------------------------------------------------------------------
+# enrich_from_website  (HTTP fully mocked)
+# ---------------------------------------------------------------------------
 
 class TestEnrichFromWebsite(unittest.TestCase):
 
@@ -652,6 +775,7 @@ class TestScrapeGoogleMaps(unittest.TestCase):
         mock_enrich.return_value = {
             "emails": {"contact@example.com"},
             "phone": "",
+            "whatsapp_number": "",
             "linkedin": "https://linkedin.com/company/biz",
             "twitter": "",
             "facebook": "",
@@ -764,7 +888,7 @@ class TestScrapeGoogleMaps(unittest.TestCase):
         """When the results feed yields no links, return an empty list."""
         mock_session.return_value = MagicMock()
         mock_enrich.return_value = {
-            "emails": set(), "phone": "", "linkedin": "",
+            "emails": set(), "phone": "", "whatsapp_number": "", "linkedin": "",
             "twitter": "", "facebook": "", "instagram": "",
             "contact_page": "", "issues": [],
         }
@@ -835,7 +959,7 @@ class TestScrapeGoogleMaps(unittest.TestCase):
         """Listings without a website URL should skip enrich_from_website."""
         mock_session.return_value = MagicMock()
         mock_enrich.return_value = {
-            "emails": set(), "phone": "", "linkedin": "",
+            "emails": set(), "phone": "", "whatsapp_number": "", "linkedin": "",
             "twitter": "", "facebook": "", "instagram": "",
             "contact_page": "", "issues": [],
         }
