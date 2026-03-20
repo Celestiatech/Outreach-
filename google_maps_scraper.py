@@ -938,5 +938,9 @@ def main() -> None:
     )
 
 
+# Convenience alias used by the Streamlit app and other callers.
+scrape = scrape_google_maps
+
+
 if __name__ == "__main__":
     main()
