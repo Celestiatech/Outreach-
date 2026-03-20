@@ -1,13 +1,14 @@
 Hey {name},
 
-Last one from me — I promise!
+Last one from me — I promise.
 
-I reached out a couple of times about {url} and the improvements I spotted. If now isn't the right time, completely understand.
+I reached out twice about {url} and the quick wins I spotted. Totally understand if the timing isn't right.
 
-But if you ever want a quick, no-pressure chat about growing online, just reply and I'll be in touch.
+{offer}
 
-Wishing you all the best,
+If that ever sounds useful, just reply and I'll jump in — no pressure, no pitch deck.
 
+{booking_url}
 – {from_name}
 
 ---

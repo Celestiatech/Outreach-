@@ -48,6 +48,60 @@ REPLIES_LOG_CSV = "replies_log.csv"  # cumulative log of lead replies detected
 UNSUBSCRIBE_TXT = "unsubscribe.txt"
 EMAIL_TEMPLATE_TXT = "email_template.txt"
 
+# ---------------------------------------------------------------------------
+# Conversion copy — offers, CTAs, proof lines
+# ---------------------------------------------------------------------------
+
+# Pre-written offer strings mapped to readable labels.
+# Each offer is concrete (specific outcome + timeframe).
+OFFER_LIBRARY: dict[str, str] = {
+    "🎁 Free website audit": (
+        "I'd like to send you a free 10-point website audit — "
+        "no strings attached, just a clear list of what's costing you customers."
+    ),
+    "⚡ Fix loading speed in 24h": (
+        "I can fix your page-speed issues in 24 hours, "
+        "often cutting load time by 50%+ with no redesign needed."
+    ),
+    "🖥 Free homepage redesign preview": (
+        "I'll mock up a redesigned homepage for free — "
+        "you keep it whether we work together or not."
+    ),
+    "📈 Increase conversions (no redesign)": (
+        "I can increase your conversion rate in 7 days "
+        "by fixing the UX friction points I spotted — no full redesign required."
+    ),
+    "🔍 Free SEO quick-win report": (
+        "I'll put together a free SEO quick-win report for your site — "
+        "the 3 easiest fixes that typically move rankings within a month."
+    ),
+    "💬 Quick 15-min strategy call": (
+        "I'm offering a free 15-minute strategy call this week — "
+        "I'll walk you through exactly what I'd fix and why."
+    ),
+    "(Custom — write your own)": "",
+}
+
+# Strong, outcome-focused CTAs (mapped label → full sentence).
+CTA_OPTIONS: dict[str, str] = {
+    "Should I send the audit?": "Should I send the audit over?",
+    "Want me to fix this for you?": "Want me to fix this for you? I can usually turn it around in 24–48 hours.",
+    "Can I show you exactly what's wrong?": "Can I show you exactly what's wrong? Happy to record a quick 2-min walkthrough.",
+    "Shall I book us in for a quick call?": "Shall I book us in for a quick call this week?",
+    "Can I send you a free preview?": "Can I send you a free preview of what the fix would look like?",
+    "(Custom — write your own)": "",
+}
+
+# Credibility proof lines — one-liners that signal experience without a case study.
+PROOF_EXAMPLES: list[str] = [
+    "I recently fixed this exact issue for a {niche} business and their leads doubled within 30 days.",
+    "I've helped {niche} businesses in {city} fix exactly this — usually takes less than a week.",
+    "Just wrapped up a project for a {niche} owner where we cut their bounce rate by 40%.",
+    "I've done this for a handful of small businesses and the results are always noticeable fast.",
+    "(Custom — write your own)",
+]
+
+
 BING_FIELDNAMES = [
     "source", "keyword", "niche", "url", "title", "email", "phone",
     "linkedin", "twitter", "facebook", "instagram",
@@ -1115,6 +1169,28 @@ def tab_leads() -> None:
 # Tab: Compose & Send
 # ---------------------------------------------------------------------------
 
+def _pre_substitute(template: str, static_values: dict[str, str]) -> str:
+    """
+    Replace a fixed set of placeholder keys in *template* with *static_values*.
+
+    Only keys present in *static_values* are replaced — per-row placeholders
+    like ``{name}``, ``{url}``, ``{issues}`` are left intact for
+    :func:`bulk_emailer._render_template` to resolve at send time.
+    """
+    import string
+    formatter = string.Formatter()
+    parts: list[str] = []
+    for literal_text, field_name, format_spec, conversion in formatter.parse(template):
+        parts.append(literal_text)
+        if field_name is not None:
+            if field_name in static_values:
+                parts.append(static_values[field_name])
+            else:
+                # Put the placeholder back verbatim for bulk_emailer to fill.
+                parts.append("{" + field_name + "}")
+    return "".join(parts)
+
+
 def tab_send() -> None:
     st.header("✉️ Compose & Send")
     st.caption("Personalise and send outreach emails to your leads via SMTP.")
@@ -1137,12 +1213,85 @@ def tab_send() -> None:
             "Your regular password will not work."
         )
 
+    with st.expander("🎯 Offer Engine — *what you're giving them*", expanded=True):
+        st.caption(
+            "Choose a concrete offer. People reply to **specific outcomes**, not generic services. "
+            "This fills the `{offer}` placeholder in your template."
+        )
+        offer_label = st.selectbox(
+            "Select offer",
+            list(OFFER_LIBRARY.keys()),
+            help="Pick the offer that best matches your outreach goal.",
+        )
+        default_offer_text = OFFER_LIBRARY[offer_label]
+        offer_text = st.text_area(
+            "Offer text (editable)",
+            value=default_offer_text,
+            height=80,
+            help="This replaces `{offer}` in your email template.",
+        )
+
+    with st.expander("💬 CTA — *what you want them to do*", expanded=True):
+        st.caption(
+            "A clear, specific ask gets far more replies than 'let me know if you're interested'. "
+            "This fills the `{cta}` placeholder."
+        )
+        cta_label = st.selectbox(
+            "Select CTA",
+            list(CTA_OPTIONS.keys()),
+        )
+        default_cta_text = CTA_OPTIONS[cta_label]
+        cta_text = st.text_input(
+            "CTA text (editable)",
+            value=default_cta_text,
+            help="This replaces `{cta}` in your email template.",
+        )
+
+    with st.expander("✅ Social Proof — *one-liner credibility*", expanded=True):
+        st.caption(
+            "One sentence of proof closes the credibility gap without a full case study. "
+            "Supports `{niche}` and `{city}` placeholders (filled per-row at send time). "
+            "Fills the `{proof}` placeholder."
+        )
+        proof_choice = st.selectbox(
+            "Proof example",
+            PROOF_EXAMPLES,
+        )
+        proof_text = st.text_input(
+            "Proof line (editable)",
+            value="" if proof_choice == "(Custom — write your own)" else proof_choice,
+            help="Replaces `{proof}` in your email template.",
+        )
+
+    with st.expander("🔗 Booking Link — *deal-closing layer*", expanded=False):
+        st.caption(
+            "Add a calendar / booking link so a warm prospect can book directly. "
+            "Leave blank to omit. Fills the `{booking_url}` placeholder."
+        )
+        booking_url = st.text_input(
+            "Booking / calendar URL",
+            placeholder="https://calendly.com/yourname/15min",
+            help="Replaces `{booking_url}` in your template. Leave blank to remove the line.",
+        )
+        booking_line = f"👉 Book a quick call: {booking_url}" if booking_url.strip() else ""
+
     with st.expander("📝 Email Content", expanded=True):
         subject = st.text_input("Subject line", value="Quick question for {name}",
                                 help="Supports placeholders: {name}, {url}, {phone}, or any CSV column name.")
         template_body = st.text_area("Email body template", value=_default_template(), height=220,
-                                     help="Use {name}, {url}, {phone} etc. – replaced with values from each lead row.")
+                                     help="Use {name}, {url}, {issues}, {offer}, {cta}, {proof}, {booking_url} etc.")
         is_html = st.checkbox("HTML email", value=False)
+
+        # Show a live preview of the static substitutions
+        static_values = {
+            "offer": offer_text,
+            "cta": cta_text,
+            "proof": proof_text,
+            "booking_url": booking_line,
+        }
+        preview_body = _pre_substitute(template_body, static_values)
+        with st.expander("👁 Template preview (static placeholders resolved)"):
+            st.code(preview_body, language="text")
 
     with st.expander("⚙️ Sending Options", expanded=False):
         leads_csv = st.text_input("Leads CSV path", value=LIVE_LEADS_CSV)
@@ -1163,10 +1312,15 @@ def tab_send() -> None:
         import importlib
         be = importlib.import_module("bulk_emailer")
 
+        # Pre-substitute static values (offer, cta, proof, booking_url) into
+        # the template.  Per-row placeholders ({name}, {url}, …) remain for
+        # bulk_emailer to fill at send time.
+        resolved_template = _pre_substitute(template_body, static_values)
+
         # Build an args namespace matching bulk_emailer.cmd_send expectations
         ns = argparse.Namespace(
             csv=leads_csv,
-            template=None,          # we'll monkey-patch template_body below
+            template=None,
             subject=subject,
             from_name=from_name,
             smtp_host=smtp_host,
@@ -1181,11 +1335,11 @@ def tab_send() -> None:
             dry_run=dry_run,
         )
 
-        # Write template to a cross-platform temp file so bulk_emailer can read it
+        # Write resolved template to a cross-platform temp file
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", prefix="outreach_template_", delete=False, encoding="utf-8"
         ) as tmp_f:
-            tmp_f.write(template_body)
+            tmp_f.write(resolved_template)
             tmp_template_path = tmp_f.name
         ns.template = tmp_template_path
 
@@ -1499,6 +1653,32 @@ def _render_follow_up_send_form(
 
         subject = st.text_input("Subject", value=default_subject, key=f"{key_prefix}_subj")
         body = st.text_area("Email body", value=default_body, height=180, key=f"{key_prefix}_body")
+
+        # Conversion copy fields
+        offer_label_fu = st.selectbox(
+            "Offer", list(OFFER_LIBRARY.keys()), key=f"{key_prefix}_offer_label"
+        )
+        offer_fu = st.text_input(
+            "Offer text", value=OFFER_LIBRARY[offer_label_fu], key=f"{key_prefix}_offer_text",
+            help="Fills `{offer}` in the template.",
+        )
+        cta_label_fu = st.selectbox(
+            "CTA", list(CTA_OPTIONS.keys()), key=f"{key_prefix}_cta_label"
+        )
+        cta_fu = st.text_input(
+            "CTA text", value=CTA_OPTIONS[cta_label_fu], key=f"{key_prefix}_cta_text",
+            help="Fills `{cta}` in the template.",
+        )
+        proof_fu = st.text_input(
+            "Proof line", value="", key=f"{key_prefix}_proof",
+            help="Fills `{proof}` — leave blank to remove that line.",
+        )
+        booking_fu = st.text_input(
+            "Booking URL", value="", key=f"{key_prefix}_booking",
+            placeholder="https://calendly.com/yourname/15min",
+            help="Fills `{booking_url}` — leave blank to omit.",
+        )
+
         dry_run = st.checkbox("Dry run (preview only)", value=True, key=f"{key_prefix}_dry")
 
         submit = st.form_submit_button(
@@ -1510,10 +1690,18 @@ def _render_follow_up_send_form(
         be = importlib.import_module("bulk_emailer")
         import argparse as _ap
 
+        static_fu = {
+            "offer": offer_fu,
+            "cta": cta_fu,
+            "proof": proof_fu,
+            "booking_url": f"👉 Book a quick call: {booking_fu}" if booking_fu.strip() else "",
+        }
+        resolved_body = _pre_substitute(body, static_fu)
+
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", prefix="fu_tmpl_", delete=False, encoding="utf-8"
         ) as tmp:
-            tmp.write(body)
+            tmp.write(resolved_body)
             tmp_path = tmp.name
 
         ns = _ap.Namespace(

@@ -1,13 +1,16 @@
 Hey {name},
 
-Came across {url} and noticed a few quick wins that could help you get more customers online:
+Came across {url} and spotted a few quick wins that could help you get more customers:
 
 {issues}
 
-I help {niche} businesses like yours fix exactly this — usually takes less than a week and the results are noticeable fast.
+{proof}
 
-Happy to share a quick idea for free. Would a 15-minute call this week work for you?
+{offer}
 
+{cta}
+
+{booking_url}
 – {from_name}
 
 ---

@@ -1,13 +1,16 @@
 Hey {name},
 
-Just following up on my previous message — wanted to make sure it didn't get buried.
+Just following up — wanted to make sure my last message didn't get buried.
 
-I noticed {issues} on {url} and thought it was worth a quick chat about how to fix it.
+I spotted {issues} on {url} and thought it was worth a quick note.
 
-I've helped {niche} businesses in {city} sort these out in a single session — happy to do the same for you at no cost.
+{proof}
 
-Would a short 15-minute call this week work?
+{offer}
 
+{cta}
+
+{booking_url}
 – {from_name}
 
 ---
