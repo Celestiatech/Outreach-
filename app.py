@@ -45,8 +45,46 @@ LEADS_CSV = "leads.csv"           # staging / most-recent scrape
 LIVE_LEADS_CSV = "live_leads.csv" # permanent cumulative store
 SENT_LOG_CSV = "sent_log.csv"
 REPLIES_LOG_CSV = "replies_log.csv"  # cumulative log of lead replies detected
+PIPELINE_CSV = "pipeline.csv"        # CRM pipeline tracking per lead
 UNSUBSCRIBE_TXT = "unsubscribe.txt"
 EMAIL_TEMPLATE_TXT = "email_template.txt"
+
+# ---------------------------------------------------------------------------
+# Pipeline / CRM constants
+# ---------------------------------------------------------------------------
+
+PIPELINE_STATUSES: list[str] = [
+    "new",
+    "contacted",
+    "replied",
+    "interested",
+    "call_booked",
+    "closed_won",
+    "closed_lost",
+]
+
+PIPELINE_STATUS_EMOJI: dict[str, str] = {
+    "new": "🆕",
+    "contacted": "📤",
+    "replied": "💬",
+    "interested": "🔥",
+    "call_booked": "📞",
+    "closed_won": "🏆",
+    "closed_lost": "❌",
+}
+
+# Simple keyword lists for reply classification
+_REPLY_POSITIVE_KW: list[str] = [
+    "yes", "interested", "sounds good", "let's chat", "book", "schedule",
+    "when can", "tell me more", "how much", "price", "cost", "available",
+    "love to", "would like", "happy to", "sure", "absolutely", "definitely",
+    "please send", "great idea", "looks good", "sign me up",
+]
+_REPLY_NEGATIVE_KW: list[str] = [
+    "not interested", "no thanks", "unsubscribe", "remove me",
+    "please remove", "stop emailing", "don't contact", "do not contact",
+    "not looking", "already have someone", "no need", "not relevant",
+]
 
 # ---------------------------------------------------------------------------
 # Conversion copy — offers, CTAs, proof lines
@@ -228,6 +266,95 @@ def _default_template() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline / CRM helpers
+# ---------------------------------------------------------------------------
+
+def _classify_reply(subject: str) -> str:
+    """Return ``'positive'``, ``'negative'``, or ``'neutral'`` from reply subject."""
+    text = subject.lower()
+    for kw in _REPLY_NEGATIVE_KW:
+        if kw in text:
+            return "negative"
+    for kw in _REPLY_POSITIVE_KW:
+        if kw in text:
+            return "positive"
+    return "neutral"
+
+
+def _load_pipeline() -> pd.DataFrame:
+    """Load pipeline.csv; return empty DataFrame with correct columns if absent."""
+    p = Path(PIPELINE_CSV)
+    if not p.exists() or p.stat().st_size == 0:
+        return pd.DataFrame(columns=[
+            "email", "name", "status", "deal_value",
+            "reply_tag", "source", "keyword", "niche", "last_updated",
+        ])
+    return pd.read_csv(p, dtype=str).fillna("")
+
+
+def _save_pipeline(df: pd.DataFrame) -> None:
+    df.to_csv(PIPELINE_CSV, index=False)
+
+
+def _upsert_pipeline_entries(records: List[Dict]) -> int:
+    """
+    Insert new pipeline rows for *records* (list of lead dicts).
+    Existing entries (matched on email) are left unchanged.
+    Returns the number of new rows added.
+    """
+    pip_df = _load_pipeline()
+    existing_emails: set[str] = set(pip_df["email"].str.lower().str.strip())
+    now_ts = datetime.now(timezone.utc).isoformat()
+    new_rows: List[Dict] = []
+    for r in records:
+        email = str(r.get("email", "")).lower().strip()
+        if not email or email in existing_emails:
+            continue
+        new_rows.append({
+            "email": email,
+            "name": r.get("title") or r.get("name") or "",
+            "status": "new",
+            "deal_value": "0",
+            "reply_tag": "",
+            "source": r.get("source", ""),
+            "keyword": r.get("keyword", ""),
+            "niche": r.get("niche") or r.get("category", ""),
+            "last_updated": now_ts,
+        })
+        existing_emails.add(email)
+    if new_rows:
+        pip_df = pd.concat([pip_df, pd.DataFrame(new_rows)], ignore_index=True)
+        _save_pipeline(pip_df)
+    return len(new_rows)
+
+
+def _pipeline_promote(email: str, new_status: str, reply_tag: str = "") -> None:
+    """
+    Move a pipeline entry to *new_status* (only if it represents forward progress).
+    Optionally set *reply_tag*.
+    """
+    pip_df = _load_pipeline()
+    if pip_df.empty or "email" not in pip_df.columns:
+        return
+    mask = pip_df["email"].str.lower().str.strip() == email.lower().strip()
+    if not mask.any():
+        return
+    current_status = pip_df.loc[mask, "status"].iloc[0]
+    # Only promote forward (don't downgrade closed_won/closed_lost)
+    if current_status in ("closed_won", "closed_lost"):
+        return
+    idx_current = PIPELINE_STATUSES.index(current_status) if current_status in PIPELINE_STATUSES else 0
+    idx_new = PIPELINE_STATUSES.index(new_status) if new_status in PIPELINE_STATUSES else 0
+    if idx_new > idx_current:
+        pip_df.loc[mask, "status"] = new_status
+        pip_df.loc[mask, "last_updated"] = datetime.now(timezone.utc).isoformat()
+    if reply_tag:
+        pip_df.loc[mask, "reply_tag"] = reply_tag
+        pip_df.loc[mask, "last_updated"] = datetime.now(timezone.utc).isoformat()
+    _save_pipeline(pip_df)
+
+
+# ---------------------------------------------------------------------------
 # Logging capture helper (routes stdlib logging into a queue)
 # ---------------------------------------------------------------------------
 
@@ -384,6 +511,7 @@ def _render_sidebar() -> None:
         live_df = _read_csv(LIVE_LEADS_CSV)
         staging_df = _read_csv(LEADS_CSV)
         sent_df = _read_csv(SENT_LOG_CSV)
+        pip_df = _load_pipeline()
 
         live_total = len(live_df)
         live_emails = (
@@ -393,12 +521,24 @@ def _render_sidebar() -> None:
         staged = len(staging_df)
         sent_n = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
 
+        # Pipeline quick-stats
+        closed_won = int((pip_df["status"] == "closed_won").sum()) if "status" in pip_df.columns else 0
+        revenue = 0.0
+        if "deal_value" in pip_df.columns and "status" in pip_df.columns:
+            won_mask = pip_df["status"] == "closed_won"
+            revenue = pd.to_numeric(pip_df.loc[won_mask, "deal_value"], errors="coerce").fillna(0).sum()
+
         st.caption("📊 QUICK STATS")
         s1, s2 = st.columns(2)
         s1.metric("Live Leads", f"{live_total:,}")
         s2.metric("Sent", f"{sent_n:,}")
         s1.metric("Emails", f"{live_emails:,}")
         s2.metric("Staged", f"{staged:,}")
+
+        st.caption("💰 PIPELINE")
+        p1, p2 = st.columns(2)
+        p1.metric("Closed 🏆", f"{closed_won:,}")
+        p2.metric("Revenue", f"${revenue:,.0f}")
 
         st.divider()
         st.caption("🗂 TABS")
@@ -413,6 +553,7 @@ def _render_sidebar() -> None:
             | 📅 Follow-ups | Day-3 & Day-7 sequences |
             | 📑 Sent Log | Track sends |
             | 💬 Replies | Inbox check |
+            | 🎯 Pipeline | CRM & deal tracking |
             | 🚫 Unsub | Opt-out list |
             """,
             unsafe_allow_html=False,
@@ -632,6 +773,75 @@ def tab_dashboard() -> None:
         else:
             with ri_col1:
                 st.info("Scrape leads to enable reply attribution.", icon="🔍")
+
+    # --- Pipeline / Deal Tracking ---
+    pip_df = _load_pipeline()
+    st.divider()
+    st.subheader("🎯 Pipeline & Deal Tracking")
+    if pip_df.empty:
+        st.info(
+            "No pipeline data yet. Scrape leads and push them to Live Leads to populate the pipeline.",
+            icon="🎯",
+        )
+    else:
+        status_counts: dict[str, int] = {s: 0 for s in PIPELINE_STATUSES}
+        if "status" in pip_df.columns:
+            for s, cnt in pip_df["status"].value_counts().items():
+                if s in status_counts:
+                    status_counts[s] = int(cnt)
+
+        revenue = 0.0
+        if "deal_value" in pip_df.columns and "status" in pip_df.columns:
+            won_mask = pip_df["status"] == "closed_won"
+            revenue = pd.to_numeric(pip_df.loc[won_mask, "deal_value"], errors="coerce").fillna(0).sum()
+
+        p_cols = st.columns(7)
+        for i, s in enumerate(PIPELINE_STATUSES):
+            emoji = PIPELINE_STATUS_EMOJI.get(s, "")
+            p_cols[i].metric(f"{emoji} {s.replace('_', ' ').title()}", f"{status_counts[s]:,}")
+
+        st.caption(f"💰 **Total revenue from closed deals: ${revenue:,.0f}**")
+
+        # Conversion funnel
+        funnel_data = pd.DataFrame({
+            "stage": [PIPELINE_STATUS_EMOJI.get(s, "") + " " + s.replace("_", " ").title()
+                      for s in PIPELINE_STATUSES],
+            "count": [status_counts[s] for s in PIPELINE_STATUSES],
+        })
+        if funnel_data["count"].sum() > 0:
+            st.bar_chart(funnel_data.set_index("stage")["count"])
+
+        # Revenue attribution
+        if "keyword" in pip_df.columns and "deal_value" in pip_df.columns:
+            won_df = pip_df[pip_df["status"] == "closed_won"].copy() if "status" in pip_df.columns else pd.DataFrame()
+            if not won_df.empty:
+                st.divider()
+                rev_col1, rev_col2 = st.columns(2)
+                with rev_col1:
+                    st.write("**Revenue by keyword**")
+                    won_df["_val"] = pd.to_numeric(won_df["deal_value"], errors="coerce").fillna(0)
+                    kw_rev = (
+                        won_df.groupby("keyword")["_val"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .head(15)
+                        .rename_axis("keyword")
+                        .reset_index(name="revenue")
+                    )
+                    if not kw_rev.empty:
+                        st.bar_chart(kw_rev.set_index("keyword")["revenue"])
+                with rev_col2:
+                    st.write("**Revenue by source**")
+                    if "source" in won_df.columns:
+                        src_rev = (
+                            won_df.groupby("source")["_val"]
+                            .sum()
+                            .sort_values(ascending=False)
+                            .rename_axis("source")
+                            .reset_index(name="revenue")
+                        )
+                        if not src_rev.empty:
+                            st.bar_chart(src_rev.set_index("source")["revenue"])
 
 
 
@@ -944,12 +1154,14 @@ def tab_scrape() -> None:
 
         if push_btn:
             new_count, dup_count = _push_to_live_leads(staged)
+            pip_new = _upsert_pipeline_entries(staged)
             st.session_state.pop("staged_records", None)
             st.session_state.pop("staged_engine", None)
             if new_count:
                 st.success(
                     f"🎉 **{new_count} new lead(s)** added to `{LIVE_LEADS_CSV}`. "
-                    f"{dup_count} duplicate(s) skipped."
+                    f"{dup_count} duplicate(s) skipped. "
+                    f"{pip_new} new pipeline entr{'y' if pip_new == 1 else 'ies'} created."
                 )
             else:
                 st.info(
@@ -1608,7 +1820,7 @@ def tab_replies() -> None:
             st.error(f"IMAP error: {error_holder[0]}")
             return
 
-        # --- Persist lead replies to replies_log.csv ---
+        # --- Persist lead replies to replies_log.csv and update pipeline ---
         if lead_replies:
             replies_log_path = Path(REPLIES_LOG_CSV)
             now_ts = datetime.now(timezone.utc).isoformat()
@@ -1616,25 +1828,49 @@ def tab_replies() -> None:
             with replies_log_path.open("a", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(
                     fh,
-                    fieldnames=["logged_at", "from_email", "name", "subject", "date"],
+                    fieldnames=["logged_at", "from_email", "name", "subject", "date", "reply_tag"],
                 )
                 if not log_exists:
                     writer.writeheader()
                 for r in lead_replies:
+                    tag = _classify_reply(r["subject"])
+                    r["reply_tag"] = tag
                     writer.writerow({
                         "logged_at": now_ts,
                         "from_email": r["from"],
                         "name": r["name"],
                         "subject": r["subject"],
                         "date": r["date"],
+                        "reply_tag": tag,
                     })
+                    # Promote pipeline: all replies → "replied"; positive → "interested"
+                    new_pipeline_status = "interested" if tag == "positive" else "replied"
+                    _pipeline_promote(r["from"], new_pipeline_status, reply_tag=tag)
 
         st.subheader(f"Replies from leads ({len(lead_replies)})")
         if lead_replies:
-            st.dataframe(pd.DataFrame(lead_replies), use_container_width=True)
+            display_replies = pd.DataFrame(lead_replies)
+            # Add human-readable tag labels for display only (raw tags used for counts)
+            if "reply_tag" in display_replies.columns:
+                tag_labels = {"positive": "✅ Positive", "negative": "❌ Negative", "neutral": "😐 Neutral"}
+                display_replies["reply_tag"] = display_replies["reply_tag"].map(
+                    lambda t: tag_labels.get(t, t)
+                )
+            st.dataframe(display_replies, use_container_width=True)
+
+            # Classification summary — count raw tags before label mapping
+            raw_tags = [r.get("reply_tag", "neutral") for r in lead_replies]
+            pos = sum(1 for t in raw_tags if t == "positive")
+            neg = sum(1 for t in raw_tags if t == "negative")
+            neu = sum(1 for t in raw_tags if t == "neutral")
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("✅ Positive replies", pos)
+            sc2.metric("😐 Neutral replies", neu)
+            sc3.metric("❌ Negative replies", neg)
+
             st.success(
                 f"✅ {len(lead_replies)} lead reply(ies) logged to `{REPLIES_LOG_CSV}` "
-                "for dashboard analytics.",
+                "and pipeline statuses updated.",
                 icon="📝",
             )
         else:
@@ -1645,6 +1881,229 @@ def tab_replies() -> None:
                 st.dataframe(pd.DataFrame(other_msgs), use_container_width=True)
             else:
                 st.write("None.")
+
+
+# ---------------------------------------------------------------------------
+# Tab: Pipeline (CRM)
+# ---------------------------------------------------------------------------
+
+def tab_pipeline() -> None:
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg,#22c55e 0%,#0ea5e9 60%,#6366f1 100%);
+            border-radius:14px;padding:22px 28px;margin-bottom:20px;color:#fff;
+        ">
+            <div style="font-size:1.5rem;font-weight:800;letter-spacing:-.03em;">🎯 Pipeline & Deal Tracking</div>
+            <div style="font-size:.9rem;opacity:.85;margin-top:4px;">
+                Track every lead from first contact to closed deal — and see which keywords make you money.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    pip_df = _load_pipeline()
+
+    if pip_df.empty:
+        st.info(
+            "No pipeline entries yet. Scrape leads and click **Push to Live Leads** "
+            "to auto-populate the pipeline.",
+            icon="🎯",
+        )
+        return
+
+    # --- Funnel KPIs ---
+    status_counts: dict[str, int] = {s: 0 for s in PIPELINE_STATUSES}
+    if "status" in pip_df.columns:
+        for s, cnt in pip_df["status"].value_counts().items():
+            if s in status_counts:
+                status_counts[s] = int(cnt)
+
+    # Active = any status between 'contacted' and 'call_booked' (inclusive)
+    _active_statuses = [s for s in PIPELINE_STATUSES if s not in ("new", "closed_won", "closed_lost")]
+    # Contacted = any status that is not 'new'
+    _contacted_statuses = [s for s in PIPELINE_STATUSES if s != "new"]
+
+    revenue = 0.0
+    pipeline_value = 0.0
+    if "deal_value" in pip_df.columns and "status" in pip_df.columns:
+        won_mask = pip_df["status"] == "closed_won"
+        active_mask = pip_df["status"].isin(_active_statuses)
+        revenue = pd.to_numeric(pip_df.loc[won_mask, "deal_value"], errors="coerce").fillna(0).sum()
+        pipeline_value = pd.to_numeric(pip_df.loc[active_mask, "deal_value"], errors="coerce").fillna(0).sum()
+
+    total_pip = len(pip_df)
+    contacted = sum(status_counts[s] for s in _contacted_statuses)
+    replied_pct = f"{status_counts['replied'] / contacted * 100:.0f}%" if contacted > 0 else "—"
+    close_rate = f"{status_counts['closed_won'] / contacted * 100:.0f}%" if contacted > 0 else "—"
+
+    k_cols = st.columns(6)
+    k_cols[0].metric("Total in Pipeline", f"{total_pip:,}")
+    k_cols[1].metric("Contacted", f"{contacted:,}")
+    k_cols[2].metric("Replied", f"{status_counts['replied']:,}", delta=replied_pct)
+    k_cols[3].metric("Interested 🔥", f"{status_counts['interested']:,}")
+    k_cols[4].metric("Calls Booked 📞", f"{status_counts['call_booked']:,}")
+    k_cols[5].metric("Closed Won 🏆", f"{status_counts['closed_won']:,}", delta=close_rate)
+
+    rv1, rv2 = st.columns(2)
+    rv1.metric("💰 Revenue (closed)", f"${revenue:,.0f}")
+    rv2.metric("🔮 Pipeline Value (active)", f"${pipeline_value:,.0f}")
+
+    st.divider()
+
+    # --- Funnel chart ---
+    funnel_df = pd.DataFrame({
+        "stage": [
+            f"{PIPELINE_STATUS_EMOJI.get(s, '')} {s.replace('_', ' ').title()}"
+            for s in PIPELINE_STATUSES
+        ],
+        "count": [status_counts[s] for s in PIPELINE_STATUSES],
+    })
+    st.subheader("Conversion Funnel")
+    st.bar_chart(funnel_df.set_index("stage")["count"])
+
+    # --- Revenue attribution ---
+    won_df = pip_df[pip_df["status"] == "closed_won"].copy() if "status" in pip_df.columns else pd.DataFrame()
+    if not won_df.empty and "deal_value" in won_df.columns:
+        won_df["_val"] = pd.to_numeric(won_df["deal_value"], errors="coerce").fillna(0)
+        st.divider()
+        ra_col1, ra_col2 = st.columns(2)
+        with ra_col1:
+            st.subheader("💰 Revenue by keyword")
+            if "keyword" in won_df.columns:
+                kw_rev = (
+                    won_df.groupby("keyword")["_val"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .head(15)
+                    .rename_axis("keyword")
+                    .reset_index(name="revenue ($)")
+                )
+                if not kw_rev.empty:
+                    st.bar_chart(kw_rev.set_index("keyword")["revenue ($)"])
+                else:
+                    st.info("No keyword revenue data yet.", icon="📊")
+        with ra_col2:
+            st.subheader("💰 Revenue by source")
+            if "source" in won_df.columns:
+                src_rev = (
+                    won_df.groupby("source")["_val"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .rename_axis("source")
+                    .reset_index(name="revenue ($)")
+                )
+                if not src_rev.empty:
+                    st.bar_chart(src_rev.set_index("source")["revenue ($)"])
+                else:
+                    st.info("No source revenue data yet.", icon="📊")
+
+    st.divider()
+
+    # --- Editable pipeline table ---
+    st.subheader("📋 Manage Pipeline")
+    st.caption(
+        "Update **Status** and **Deal Value** inline. "
+        "Click **💾 Save Changes** to persist. "
+        "Positive replies auto-promote to 'interested'; all replies promote to 'replied'."
+    )
+
+    # Status filter
+    status_filter = st.multiselect(
+        "Filter by status",
+        options=PIPELINE_STATUSES,
+        default=PIPELINE_STATUSES,
+        format_func=lambda s: f"{PIPELINE_STATUS_EMOJI.get(s, '')} {s.replace('_', ' ').title()}",
+    )
+    display_df = pip_df[pip_df["status"].isin(status_filter)].copy() if status_filter else pip_df.copy()
+
+    # Column config
+    status_options = [
+        f"{PIPELINE_STATUS_EMOJI.get(s, '')} {s}" for s in PIPELINE_STATUSES
+    ]
+    col_cfg = {
+        "status": st.column_config.SelectboxColumn(
+            "Status",
+            options=PIPELINE_STATUSES,
+            required=True,
+        ),
+        "deal_value": st.column_config.NumberColumn(
+            "💰 Deal Value ($)",
+            min_value=0,
+            format="$%d",
+        ),
+        "reply_tag": st.column_config.SelectboxColumn(
+            "Reply Tag",
+            options=["", "positive", "neutral", "negative"],
+        ),
+        "last_updated": st.column_config.TextColumn("Last Updated", disabled=True),
+    }
+
+    # Convert deal_value to numeric for the editor
+    display_df["deal_value"] = pd.to_numeric(display_df["deal_value"], errors="coerce").fillna(0)
+
+    edited_pip = st.data_editor(
+        display_df,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config=col_cfg,
+        disabled=[c for c in display_df.columns if c not in ("status", "deal_value", "reply_tag")],
+        key="pipeline_editor",
+    )
+
+    save_col, dl_col, _ = st.columns([2, 2, 4])
+
+    with save_col:
+        if st.button("💾 Save Changes", type="primary"):
+            # Merge edited rows back into full pipeline
+            now_ts = datetime.now(timezone.utc).isoformat()
+            full_pip = _load_pipeline()
+            full_pip["deal_value"] = pd.to_numeric(full_pip["deal_value"], errors="coerce").fillna(0)
+
+            for _, row in edited_pip.iterrows():
+                email = str(row.get("email", "")).lower().strip()
+                mask = full_pip["email"].str.lower().str.strip() == email
+                if mask.any():
+                    full_pip.loc[mask, "status"] = row["status"]
+                    full_pip.loc[mask, "deal_value"] = str(round(float(row["deal_value"]), 2))
+                    if row.get("reply_tag"):
+                        full_pip.loc[mask, "reply_tag"] = row["reply_tag"]
+                    full_pip.loc[mask, "last_updated"] = now_ts
+
+            _save_pipeline(full_pip)
+            st.success("✅ Pipeline saved.")
+            st.rerun()
+
+    with dl_col:
+        csv_bytes = edited_pip.to_csv(index=False).encode()
+        st.download_button(
+            "⬇ Download pipeline CSV",
+            data=csv_bytes,
+            file_name="pipeline.csv",
+            mime="text/csv",
+        )
+
+    # --- Add leads from Live Leads that aren't in pipeline ---
+    st.divider()
+    with st.expander("➕ Add missing Live Leads to Pipeline"):
+        live_df = _read_csv(LIVE_LEADS_CSV)
+        if live_df.empty:
+            st.info("No live leads found.", icon="📂")
+        else:
+            existing_emails = set(pip_df["email"].str.lower().str.strip())
+            if "email" in live_df.columns:
+                normalised = live_df["email"].str.lower().str.strip()
+                missing = live_df[normalised.str.len() > 0 & ~normalised.isin(existing_emails)]
+            else:
+                missing = pd.DataFrame()
+
+            st.write(f"**{len(missing)} lead(s) not yet in pipeline**")
+            if not missing.empty:
+                if st.button("➕ Add all missing leads to pipeline", type="secondary"):
+                    added = _upsert_pipeline_entries(missing.to_dict("records"))
+                    st.success(f"✅ Added {added} lead(s) to pipeline.")
+                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1939,7 +2398,7 @@ def tab_follow_ups() -> None:
 _inject_css()
 _render_sidebar()
 
-tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📅 Follow-ups", "📑 Sent Log", "💬 Replies", "🚫 Unsubscribes"])
+tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📅 Follow-ups", "📑 Sent Log", "💬 Replies", "🎯 Pipeline", "🚫 Unsubscribes"])
 
 with tabs[0]:
     tab_dashboard()
@@ -1963,4 +2422,7 @@ with tabs[6]:
     tab_replies()
 
 with tabs[7]:
+    tab_pipeline()
+
+with tabs[8]:
     tab_unsubscribe()
