@@ -7,6 +7,8 @@ Run:
     streamlit run app.py
 """
 
+from __future__ import annotations
+
 import csv
 import imaplib
 import io
@@ -20,6 +22,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Dict, List, Set
 
 import pandas as pd
 import streamlit as st
@@ -378,13 +381,13 @@ def tab_unsubscribe() -> None:
 
     unsub_path = Path(UNSUBSCRIBE_TXT)
 
-    def _load() -> list[str]:
+    def _load() -> List[str]:
         if not unsub_path.exists():
             return []
         lines = unsub_path.read_text(encoding="utf-8").splitlines()
         return [ln.strip().lower() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
-    def _save(addresses: list[str]) -> None:
+    def _save(addresses: List[str]) -> None:
         unsub_path.write_text("\n".join(sorted(set(addresses))) + "\n", encoding="utf-8")
 
     addresses = _load()
@@ -422,7 +425,7 @@ def tab_unsubscribe() -> None:
     # --- Display and remove ---
     if addresses:
         st.subheader("Current list")
-        remove_set: set[str] = set()
+        remove_set: Set[str] = set()
         for addr in sorted(addresses):
             col_a, col_b = st.columns([5, 1])
             col_a.write(addr)
@@ -467,7 +470,7 @@ def tab_scrape() -> None:
     result_box = st.empty()
 
     if run_btn and keyword.strip():
-        log_lines: list[str] = []
+        log_lines: List[str] = []
         log_q: queue.Queue = queue.Queue()
 
         # Attach queue handler to the root logger so scraper output is captured
@@ -476,8 +479,8 @@ def tab_scrape() -> None:
         root_logger = logging.getLogger()
         root_logger.addHandler(q_handler)
 
-        records: list[dict] = []
-        error_holder: list[str] = []
+        records: List[Dict] = []
+        error_holder: List[str] = []
 
         def _run() -> None:
             try:
@@ -494,7 +497,11 @@ def tab_scrape() -> None:
                         else:
                             save_to_csv(records, output_path)
                 else:
-                    from google_maps_scraper import scrape as maps_scrape, save_to_csv as maps_save
+                    from google_maps_scraper import save_to_csv as maps_save
+                    try:
+                        from google_maps_scraper import scrape as maps_scrape
+                    except ImportError:
+                        from google_maps_scraper import scrape_google_maps as maps_scrape
                     records.extend(maps_scrape(keyword=keyword.strip(), num_results=int(num_results)))
                     if records:
                         if append and Path(output_path).exists():
@@ -731,14 +738,14 @@ def tab_send() -> None:
             tmp_template_path = tmp_f.name
         ns.template = tmp_template_path
 
-        log_lines: list[str] = []
+        log_lines: List[str] = []
         log_q: queue.Queue = queue.Queue()
         q_handler = _QueueHandler(log_q)
         q_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         root_logger = logging.getLogger()
         root_logger.addHandler(q_handler)
 
-        error_holder: list[str] = []
+        error_holder: List[str] = []
 
         def _run_send() -> None:
             try:
@@ -885,9 +892,9 @@ def tab_replies() -> None:
             since=int(since_days),
         )
 
-        lead_replies: list[dict] = []
-        other_msgs: list[dict] = []
-        error_holder: list[str] = []
+        lead_replies: List[Dict] = []
+        other_msgs: List[Dict] = []
+        error_holder: List[str] = []
 
         import email as email_lib
         from email.utils import parseaddr
@@ -898,7 +905,7 @@ def tab_replies() -> None:
                     datetime.now(timezone.utc) - timedelta(days=int(since_days))
                 ).strftime("%d-%b-%Y")
 
-                sent_emails: set[str] = set()
+                sent_emails: Set[str] = set()
                 if Path(sent_log_path).exists():
                     with open(sent_log_path, newline="", encoding="utf-8") as fh:
                         for row in csv.DictReader(fh):

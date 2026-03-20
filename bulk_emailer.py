@@ -1,6 +1,5 @@
 """
 Bulk Email Sender & Reply Checker
-----------------------------------
 Reads a leads CSV produced by the scrapers, sends personalised outreach
 emails via SMTP, logs every send attempt, and can check your inbox for
 replies from leads.
@@ -36,6 +35,8 @@ Environment variables (alternative to CLI flags):
     SMTP_HOST, SMTP_PORT, IMAP_HOST, IMAP_PORT,
     EMAIL_ADDRESS, EMAIL_PASSWORD
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
@@ -245,6 +246,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     if not recipients:
         logger.info("No new recipients to send to.")
         return
+
 
     logger.info("Preparing to send to %d address(es).", len(recipients))
 

@@ -26,6 +26,7 @@ Usage:
         --email me@example.com --password secret \\
         --keyword "software engineer jobs" --results 50 --output leads.csv
 """
+from __future__ import annotations
 
 import argparse
 import csv

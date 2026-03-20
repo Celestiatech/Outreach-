@@ -15,6 +15,8 @@ Usage:
     python google_maps_scraper.py --keyword "digital agency London" --results 50 --output leads.csv
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import logging

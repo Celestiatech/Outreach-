@@ -14,6 +14,8 @@ Usage:
     python bing_email_scraper.py --keyword "digital agency UK" --results 20 --output leads.csv
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import logging
