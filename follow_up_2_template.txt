@@ -1,0 +1,14 @@
+Hey {name},
+
+Last one from me — I promise!
+
+I reached out a couple of times about {url} and the improvements I spotted. If now isn't the right time, completely understand.
+
+But if you ever want a quick, no-pressure chat about growing online, just reply and I'll be in touch.
+
+Wishing you all the best,
+
+– {from_name}
+
+---
+To unsubscribe, reply with "unsubscribe" in the subject line.

@@ -48,15 +48,79 @@ UNSUBSCRIBE_TXT = "unsubscribe.txt"
 EMAIL_TEMPLATE_TXT = "email_template.txt"
 
 BING_FIELDNAMES = [
-    "keyword", "url", "title", "email", "phone",
+    "source", "keyword", "url", "title", "email", "phone",
     "linkedin", "twitter", "facebook", "instagram",
     "contact_page", "issues", "lead_score",
 ]
 MAPS_FIELDNAMES = [
-    "keyword", "name", "address", "phone", "website", "rating", "reviews",
+    "source", "keyword", "name", "address", "phone", "website", "rating", "reviews",
     "category", "email", "linkedin", "twitter", "facebook", "instagram",
     "contact_page", "issues", "lead_score",
 ]
+
+# ---------------------------------------------------------------------------
+# Keyword library — categorised buyer-intent / niche search queries
+# ---------------------------------------------------------------------------
+
+KEYWORD_LIBRARY: dict[str, list[str]] = {
+    "💰 Service Buyers": [
+        "looking for web developer",
+        "need SEO expert",
+        "hire digital marketer",
+        "website redesign needed",
+        "looking for freelancer",
+        "need website built",
+        "web design needed",
+        "need online marketing help",
+    ],
+    "⚡ Urgent / High Intent": [
+        "need website urgently",
+        "looking for developer asap",
+        "project available freelance",
+        "immediate requirement designer",
+        "need developer immediately",
+        "urgent web design needed",
+        "hire developer now",
+        "website help asap",
+    ],
+    "🏢 Local Business Niches": [
+        "dentist",
+        "gym personal trainer",
+        "real estate agent",
+        "restaurant",
+        "plumber",
+        "accountant small business",
+        "law firm",
+        "car dealership",
+    ],
+    "🌐 Service Businesses": [
+        "digital agency",
+        "marketing agency",
+        "web design studio",
+        "SEO company",
+        "social media agency",
+        "branding agency",
+        "e-commerce store",
+    ],
+    "🎯 Problem-Based (High Conversion)": [
+        "low website conversion",
+        "slow website fix",
+        "no online booking",
+        "website not ranking Google",
+        "need more customers online",
+        "increase website traffic",
+        "outdated website redesign",
+        "poor website design help",
+    ],
+    "🔥 Freelance / Startup": [
+        "freelance developer needed",
+        "remote developer job",
+        "contract web developer",
+        "startup looking for developer",
+        "small business website help",
+        "part time SEO specialist",
+    ],
+}
 
 
 def _read_csv(path: str) -> pd.DataFrame:
@@ -289,6 +353,7 @@ def _render_sidebar() -> None:
             | 🔍 Scrape | Collect leads |
             | 📋 Leads | Browse & filter |
             | ✉️ Send | Compose emails |
+            | 📅 Follow-ups | Day-3 & Day-7 sequences |
             | 📑 Sent Log | Track sends |
             | 💬 Replies | Inbox check |
             | 🚫 Unsub | Opt-out list |
@@ -401,6 +466,53 @@ def tab_dashboard() -> None:
         if not cat_counts.empty:
             st.bar_chart(cat_counts.set_index("category")["count"])
 
+    # --- Keyword performance ---
+    if not leads_df.empty and "keyword" in leads_df.columns:
+        st.divider()
+        st.subheader("Leads by keyword")
+        kw_counts = (
+            leads_df["keyword"]
+            .replace("", pd.NA)
+            .dropna()
+            .value_counts()
+            .head(20)
+            .rename_axis("keyword")
+            .reset_index(name="leads")
+        )
+        if not kw_counts.empty:
+            st.bar_chart(kw_counts.set_index("keyword")["leads"])
+
+    # --- Source breakdown ---
+    if not leads_df.empty and "source" in leads_df.columns:
+        st.divider()
+        src_col1, src_col2 = st.columns(2)
+        with src_col1:
+            st.subheader("Leads by source")
+            src_counts = (
+                leads_df["source"]
+                .replace("", pd.NA)
+                .dropna()
+                .value_counts()
+                .rename_axis("source")
+                .reset_index(name="count")
+            )
+            if not src_counts.empty:
+                st.bar_chart(src_counts.set_index("source")["count"])
+        with src_col2:
+            st.subheader("Emails found by source")
+            if "email" in leads_df.columns:
+                src_email = (
+                    leads_df[leads_df["email"].str.strip() != ""]
+                    ["source"]
+                    .replace("", pd.NA)
+                    .dropna()
+                    .value_counts()
+                    .rename_axis("source")
+                    .reset_index(name="with_email")
+                )
+                if not src_email.empty:
+                    st.bar_chart(src_email.set_index("source")["with_email"])
+
 
 # ---------------------------------------------------------------------------
 # Tab: Unsubscribe Manager
@@ -499,10 +611,26 @@ def tab_scrape() -> None:
 
     # ── Step 1: Keywords ─────────────────────────────────────────────────────
     st.subheader("Step 1 · Keywords")
+
+    # Keyword library: clicking a button injects the keyword into the textarea
+    with st.expander("📚 Keyword Library — click any keyword to add it to your list"):
+        for cat, kws in KEYWORD_LIBRARY.items():
+            st.markdown(f"**{cat}**")
+            cols = st.columns(4)
+            for i, kw in enumerate(kws):
+                if cols[i % 4].button(kw, key=f"kwlib_{cat}_{i}", use_container_width=True):
+                    existing = st.session_state.get("kw_textarea", "")
+                    lines = [ln.strip() for ln in existing.splitlines() if ln.strip()]
+                    if kw not in lines:
+                        lines.append(kw)
+                    st.session_state["kw_textarea"] = "\n".join(lines)
+                    st.rerun()
+
     kw_col, opt_col = st.columns([3, 1])
     with kw_col:
         keywords_raw = st.text_area(
             "Search keywords — one per line",
+            key="kw_textarea",
             placeholder="digital agency London\nweb design Birmingham\nmarketing agency UK",
             height=130,
             help="Each keyword is searched separately. Results from all keywords are combined.",
@@ -790,15 +918,61 @@ def tab_leads() -> None:
         filtered = filtered[filtered[category_col] == category_filter]
 
     st.write(f"**{len(filtered)} rows after filters**")
-    st.dataframe(filtered, use_container_width=True)
 
-    csv_bytes = filtered.to_csv(index=False).encode()
-    st.download_button(
-        "⬇ Download filtered CSV",
-        data=csv_bytes,
-        file_name="filtered_leads.csv",
-        mime="text/csv",
+    # Ensure notes column exists for editing
+    if "notes" not in filtered.columns:
+        filtered = filtered.copy()
+        filtered["notes"] = ""
+
+    # Column config for richer display
+    col_cfg: dict = {
+        "notes": st.column_config.TextColumn("📝 Notes", width="medium"),
+        "lead_score": st.column_config.NumberColumn("⭐ Score"),
+        "issues": st.column_config.TextColumn("⚠️ Issues", width="large"),
+    }
+    if "url" in filtered.columns:
+        col_cfg["url"] = st.column_config.LinkColumn("🔗 URL", display_text="Visit")
+    if "website" in filtered.columns:
+        col_cfg["website"] = st.column_config.LinkColumn("🌐 Website", display_text="Visit")
+
+    edited_df = st.data_editor(
+        filtered,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config=col_cfg,
+        disabled=[c for c in filtered.columns if c != "notes"],
+        key="leads_editor",
     )
+
+    btn_col1, btn_col2 = st.columns([2, 5])
+
+    with btn_col1:
+        csv_bytes = edited_df.to_csv(index=False).encode()
+        st.download_button(
+            "⬇ Download filtered CSV",
+            data=csv_bytes,
+            file_name="filtered_leads.csv",
+            mime="text/csv",
+        )
+
+    if source.startswith("📦") and "notes" in edited_df.columns:
+        with btn_col2:
+            if st.button("💾 Save notes to Live Leads", type="secondary"):
+                live_df = _read_csv(LIVE_LEADS_CSV)
+                if "notes" not in live_df.columns:
+                    live_df["notes"] = ""
+                if "email" in edited_df.columns and "email" in live_df.columns:
+                    notes_map = dict(zip(
+                        edited_df["email"].str.lower().str.strip(),
+                        edited_df["notes"],
+                    ))
+                    live_df["notes"] = live_df.apply(
+                        lambda r: notes_map.get(r["email"].lower().strip(), r["notes"]),
+                        axis=1,
+                    )
+                    _write_csv(LIVE_LEADS_CSV, live_df)
+                    st.success("✅ Notes saved to Live Leads.")
+                    st.rerun()
 
     # --- Charts ---
     if not filtered.empty:
@@ -1150,13 +1324,264 @@ def tab_replies() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main layout
+# Follow-up helpers
 # ---------------------------------------------------------------------------
+
+def _render_follow_up_send_form(
+    due_df: pd.DataFrame,
+    sequence_num: int,
+    key_prefix: str,
+) -> None:
+    """Render an SMTP send form for one follow-up batch."""
+    import importlib
+
+    default_templates = {
+        1: (Path("follow_up_1_template.txt"), "Quick follow-up — {name}"),
+        2: (Path("follow_up_2_template.txt"), "Last message from me — {name}"),
+    }
+    tmpl_path, default_subject = default_templates.get(
+        sequence_num, (Path("email_template.txt"), "Following up — {name}")
+    )
+    default_body = (
+        tmpl_path.read_text(encoding="utf-8")
+        if tmpl_path.exists()
+        else _default_template()
+    )
+
+    with st.form(f"{key_prefix}_form"):
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            smtp_host = st.text_input(
+                "SMTP Host", value=os.environ.get("SMTP_HOST", "smtp.gmail.com"),
+                key=f"{key_prefix}_host",
+            )
+            from_email = st.text_input(
+                "From Email", value=os.environ.get("EMAIL_ADDRESS", ""),
+                key=f"{key_prefix}_email",
+            )
+            from_name = st.text_input("Sender Name", value="", key=f"{key_prefix}_fname")
+        with fc2:
+            smtp_port = st.number_input("SMTP Port", value=587, key=f"{key_prefix}_port")
+            password = st.text_input(
+                "Password / App Password", type="password",
+                value=os.environ.get("EMAIL_PASSWORD", ""),
+                key=f"{key_prefix}_pass",
+            )
+            use_ssl = st.checkbox("Use SSL (port 465)", value=False, key=f"{key_prefix}_ssl")
+
+        subject = st.text_input("Subject", value=default_subject, key=f"{key_prefix}_subj")
+        body = st.text_area("Email body", value=default_body, height=180, key=f"{key_prefix}_body")
+        dry_run = st.checkbox("Dry run (preview only)", value=True, key=f"{key_prefix}_dry")
+
+        submit = st.form_submit_button(
+            f"▶ Send Follow-up #{sequence_num} ({len(due_df)} recipients)",
+            type="primary",
+        )
+
+    if submit:
+        be = importlib.import_module("bulk_emailer")
+        import argparse as _ap
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="fu_tmpl_", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(body)
+            tmp_path = tmp.name
+
+        ns = _ap.Namespace(
+            sequence_num=sequence_num,
+            csv=LIVE_LEADS_CSV,
+            template=tmp_path,
+            subject=subject,
+            from_name=from_name,
+            smtp_host=smtp_host,
+            smtp_port=int(smtp_port),
+            ssl=use_ssl,
+            email=from_email,
+            password=password,
+            log=SENT_LOG_CSV,
+            unsubscribe=UNSUBSCRIBE_TXT,
+            delay=2.0,
+            html=False,
+            dry_run=dry_run,
+        )
+
+        error_holder: List[str] = []
+        log_lines: List[str] = []
+        log_q: queue.Queue = queue.Queue()
+
+        q_handler = _QueueHandler(log_q)
+        q_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(q_handler)
+
+        def _run() -> None:
+            try:
+                be.cmd_follow_up(ns)
+            except SystemExit as exc:
+                if str(exc) != "0":
+                    error_holder.append(f"Send failed (exit {exc}).")
+            except Exception as exc:  # noqa: BLE001
+                error_holder.append(f"Error ({type(exc).__name__}): {exc}")
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+        log_box = st.empty()
+        tick = 0
+        while thread.is_alive():
+            while not log_q.empty():
+                log_lines.append(log_q.get_nowait())
+            log_box.text_area("Log", "\n".join(log_lines[-40:]), height=160, key=f"{key_prefix}_log_{tick}")
+            tick += 1
+            time.sleep(0.4)
+
+        while not log_q.empty():
+            log_lines.append(log_q.get_nowait())
+        root_logger.removeHandler(q_handler)
+        log_box.text_area("Log", "\n".join(log_lines[-40:]), height=160, key=f"{key_prefix}_log_final")
+
+        if error_holder:
+            st.error(error_holder[0])
+        else:
+            label = "Dry-run complete." if dry_run else f"✅ Follow-up #{sequence_num} sent!"
+            st.success(label)
+            if not dry_run:
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Tab: Follow-ups
+# ---------------------------------------------------------------------------
+
+def tab_follow_ups() -> None:
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg,#f97316 0%,#ef4444 60%,#a855f7 100%);
+            border-radius:14px;padding:22px 28px;margin-bottom:20px;color:#fff;
+        ">
+            <div style="font-size:1.5rem;font-weight:800;letter-spacing:-.03em;">📅 Follow-up Sequences</div>
+            <div style="font-size:.9rem;opacity:.85;margin-top:4px;">
+                Day-3 check-in &amp; Day-7 final message — most replies come from follow-ups.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.info(
+        "**Schedule:** Day 1 → First email · Day 3 → Follow-up #1 · Day 7 → Follow-up #2 (final)\n\n"
+        "The system reads your sent log and surfaces everyone who is now due for the next step.",
+        icon="📆",
+    )
+    st.divider()
+
+    sent_df = _read_csv(SENT_LOG_CSV)
+    if sent_df.empty:
+        st.info(
+            "No sent emails found yet. Send your first outreach from the **✉️ Compose & Send** tab first.",
+            icon="📭",
+        )
+        return
+
+    if "sequence_num" not in sent_df.columns:
+        sent_df["sequence_num"] = "0"
+    sent_df["sequence_num"] = (
+        pd.to_numeric(sent_df["sequence_num"], errors="coerce").fillna(0).astype(int)
+    )
+
+    sent_only = sent_df[sent_df["status"] == "sent"].copy()
+    if sent_only.empty:
+        st.info("No successfully sent emails recorded yet.")
+        return
+
+    sent_only["sent_at"] = pd.to_datetime(sent_only["timestamp"], errors="coerce", utc=True)
+    now = datetime.now(timezone.utc)
+
+    summary = (
+        sent_only.groupby("to_email")
+        .agg(
+            max_seq=("sequence_num", "max"),
+            last_sent=("sent_at", "max"),
+            to_name=("to_name", "first"),
+        )
+        .reset_index()
+    )
+    summary["days_since"] = (
+        (now - summary["last_sent"]).dt.total_seconds() / 86400
+    ).fillna(0).apply(lambda x: int(x))
+
+    # Follow-up #1: max_seq == 0 and days_since >= 3
+    due1 = summary[(summary["max_seq"] == 0) & (summary["days_since"] >= 3)].copy()
+    # Follow-up #2: max_seq == 1 and days_since >= 4
+    due2 = summary[(summary["max_seq"] == 1) & (summary["days_since"] >= 4)].copy()
+    # Still waiting (< 3 days since first email)
+    pending = summary[(summary["max_seq"] == 0) & (summary["days_since"] < 3)].copy()
+    # Completed full sequence
+    completed = summary[summary["max_seq"] >= 2]
+
+    # --- Summary metrics ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total contacted", f"{len(summary):,}")
+    c2.metric("Due: Day-3 follow-up", f"{len(due1):,}")
+    c3.metric("Due: Day-7 final", f"{len(due2):,}")
+    c4.metric("Full sequence done", f"{len(completed):,}")
+
+    st.divider()
+
+    # --- Day-3 follow-up ---
+    with st.expander(
+        f"📬 Day-3 Follow-up — **{len(due1)} due**",
+        expanded=len(due1) > 0,
+    ):
+        if due1.empty:
+            st.info("No contacts due for the Day-3 follow-up yet. Check back in a couple of days.")
+        else:
+            st.dataframe(
+                due1[["to_email", "to_name", "days_since", "max_seq"]].rename(columns={
+                    "to_email": "Email", "to_name": "Name",
+                    "days_since": "Days Since Last Send", "max_seq": "Sequence #",
+                }),
+                use_container_width=True,
+            )
+            _render_follow_up_send_form(due1, sequence_num=1, key_prefix="fu1")
+
+    # --- Day-7 final ---
+    with st.expander(
+        f"📬 Day-7 Final — **{len(due2)} due**",
+        expanded=len(due2) > 0,
+    ):
+        if due2.empty:
+            st.info("No contacts due for the Day-7 final follow-up yet.")
+        else:
+            st.dataframe(
+                due2[["to_email", "to_name", "days_since", "max_seq"]].rename(columns={
+                    "to_email": "Email", "to_name": "Name",
+                    "days_since": "Days Since Last Send", "max_seq": "Sequence #",
+                }),
+                use_container_width=True,
+            )
+            _render_follow_up_send_form(due2, sequence_num=2, key_prefix="fu2")
+
+    # --- Awaiting ---
+    if not pending.empty:
+        with st.expander(f"⏳ Awaiting Day-3 window — {len(pending)} contact(s)"):
+            st.dataframe(
+                pending[["to_email", "to_name", "days_since"]].rename(columns={
+                    "to_email": "Email", "to_name": "Name",
+                    "days_since": "Days Since Send",
+                }),
+                use_container_width=True,
+            )
+
+
+
 
 _inject_css()
 _render_sidebar()
 
-tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📑 Sent Log", "💬 Replies", "🚫 Unsubscribes"])
+tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📅 Follow-ups", "📑 Sent Log", "💬 Replies", "🚫 Unsubscribes"])
 
 with tabs[0]:
     tab_dashboard()
@@ -1171,10 +1596,13 @@ with tabs[3]:
     tab_send()
 
 with tabs[4]:
-    tab_sent_log()
+    tab_follow_ups()
 
 with tabs[5]:
-    tab_replies()
+    tab_sent_log()
 
 with tabs[6]:
+    tab_replies()
+
+with tabs[7]:
     tab_unsubscribe()

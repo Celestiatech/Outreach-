@@ -1,0 +1,14 @@
+Hey {name},
+
+Just following up on my previous message — wanted to make sure it didn't get buried.
+
+I noticed {issues} on {url} and thought it was worth a quick chat about how to fix it.
+
+I've helped similar businesses sort these out in a single session — happy to do the same for you at no cost.
+
+Would a short 15-minute call this week work?
+
+– {from_name}
+
+---
+To unsubscribe, reply with "unsubscribe" in the subject line.

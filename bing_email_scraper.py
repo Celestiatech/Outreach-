@@ -91,6 +91,25 @@ SCORE_HAS_PHONE = 2
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1      # Twitter / Facebook / Instagram combined
 SCORE_PER_ISSUE = -1      # deducted for every detected issue
+SCORE_URGENCY_BONUS = 2   # keyword or page title contains buyer-intent / urgency signal
+
+# Words that indicate a buyer or urgent intent in the keyword / page title.
+URGENCY_KEYWORDS: tuple[str, ...] = (
+    "urgent", "urgently", "asap", "immediately", "right away",
+    "looking for", "need help", "hire ", "hiring", "needed",
+    "required", "requirement", "project available",
+    "developer needed", "designer needed", "web developer",
+    "need website", "need seo", "need developer",
+    "website needed", "redesign needed", "freelancer needed",
+)
+
+
+def _urgency_bonus(keyword: str, title: str = "") -> int:
+    """Return ``SCORE_URGENCY_BONUS`` if *keyword* or *title* contain an urgency signal."""
+    combined = f"{keyword} {title}".lower()
+    if any(kw in combined for kw in URGENCY_KEYWORDS):
+        return SCORE_URGENCY_BONUS
+    return 0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -555,11 +574,12 @@ def scrape(keyword: str, num_results: int = 10) -> list[dict]:
     for url in urls:
         logger.info("Visiting: %s", url)
         data = extract_site_data(url, session)
-        lead_score = score_lead(data)
+        lead_score = score_lead(data) + _urgency_bonus(keyword, data.get("title", ""))
         time.sleep(REQUEST_DELAY)
 
         issues_str = "; ".join(data["issues"]) if data["issues"] else ""
         base = {
+            "source": "Bing",
             "keyword": keyword,
             "url": url,
             "title": data["title"],
@@ -624,7 +644,7 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "keyword", "url", "title", "email", "phone",
+        "source", "keyword", "url", "title", "email", "phone",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
     ]

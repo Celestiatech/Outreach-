@@ -82,6 +82,25 @@ SCORE_HAS_WEBSITE = 1
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1
 SCORE_PER_ISSUE = -1
+SCORE_URGENCY_BONUS = 2   # keyword or listing name contains buyer-intent / urgency signal
+
+# Words that indicate a buyer or urgent intent in the keyword / listing name.
+URGENCY_KEYWORDS: tuple[str, ...] = (
+    "urgent", "urgently", "asap", "immediately", "right away",
+    "looking for", "need help", "hire ", "hiring", "needed",
+    "required", "requirement", "project available",
+    "developer needed", "designer needed", "web developer",
+    "need website", "need seo", "need developer",
+    "website needed", "redesign needed", "freelancer needed",
+)
+
+
+def _urgency_bonus(keyword: str, name: str = "") -> int:
+    """Return ``SCORE_URGENCY_BONUS`` if *keyword* or *name* contain an urgency signal."""
+    combined = f"{keyword} {name}".lower()
+    if any(kw in combined for kw in URGENCY_KEYWORDS):
+        return SCORE_URGENCY_BONUS
+    return 0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -678,9 +697,10 @@ def scrape_google_maps(
                 "instagram": enrichment["instagram"],
                 "issues": enrichment["issues"],
             }
-            lead_score = score_lead(lead_data)
+            lead_score = score_lead(lead_data) + _urgency_bonus(keyword, name)
 
             base = {
+                "source": "Google Maps",
                 "keyword": keyword,
                 "name": name,
                 "address": address,
@@ -844,7 +864,7 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "keyword", "name", "address", "phone", "website",
+        "source", "keyword", "name", "address", "phone", "website",
         "rating", "reviews", "category", "email",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
