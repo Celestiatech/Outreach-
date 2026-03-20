@@ -1,13 +1,14 @@
 # How to Run the Outreach Scripts
 
-This repository contains two lead-generation scrapers:
+This repository contains three lead-generation scrapers:
 
 | Script | Source |
 |---|---|
 | `bing_email_scraper.py` | Searches Bing for a keyword and extracts contact info from result pages |
 | `google_maps_scraper.py` | Searches Google Maps for a keyword and extracts business contact info |
+| `linkedin_feed_scraper.py` | Searches the LinkedIn feed for a keyword and extracts post content, contact details, and HR / hiring signals |
 
-Both scripts save results to an enriched CSV file ready for outreach campaigns.
+All scripts save results to an enriched CSV file ready for outreach campaigns.
 
 ---
 
@@ -45,7 +46,7 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Install Playwright browsers (required for `google_maps_scraper.py` only)
+### 4. Install Playwright browsers (required for `google_maps_scraper.py` and `linkedin_feed_scraper.py`)
 
 ```bash
 playwright install chromium
@@ -103,7 +104,51 @@ python google_maps_scraper.py --keyword "plumber New York" --results 40 --output
 
 ---
 
+### LinkedIn Feed Scraper
+
+Logs into LinkedIn, searches the feed for a keyword, scrapes the full text of each
+post (expanding truncated "see more" text), and extracts emails, phone numbers, and
+HR / hiring signals from the post content.
+
+> **Credentials required** – supply your LinkedIn login details via environment
+> variables (`LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD`) or the `--email` / `--password`
+> flags.  The password is never written to disk or logged.
+
+```bash
+# Using environment variables (recommended)
+export LINKEDIN_EMAIL="you@example.com"
+export LINKEDIN_PASSWORD="your_password"
+python linkedin_feed_scraper.py --keyword "HR manager hiring London" --results 30 --output linkedin_leads.csv
+
+# Or supply credentials directly
+python linkedin_feed_scraper.py \
+    --email you@example.com --password your_password \
+    --keyword "software engineer jobs" --results 50 --output leads.csv
+```
+
+**Arguments:**
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--email` | Yes* | `$LINKEDIN_EMAIL` | LinkedIn account e-mail address |
+| `--password` | Yes* | `$LINKEDIN_PASSWORD` | LinkedIn account password |
+| `--keyword` | Yes | — | Search keyword or phrase |
+| `--results` | No | `20` | Maximum number of posts to collect |
+| `--output` | No | `linkedin_leads.csv` | Path to the output CSV file |
+
+\* Can be provided via environment variable instead of a CLI flag.
+
+**Example:**
+
+```bash
+python linkedin_feed_scraper.py --keyword "recruiter hiring" --results 40 --output recruiter_leads.csv
+```
+
+---
+
 ## Output
+
+### Bing Email Scraper & Google Maps Scraper
 
 Both scripts produce a CSV file with the following columns:
 
@@ -277,6 +322,31 @@ The dashboard opens automatically in your browser at `http://localhost:8501` and
 | 🚫 **Unsubscribes** | View, add, bulk-add, and remove addresses from `unsubscribe.txt` |
 
 
+---
+
+### LinkedIn Feed Scraper Output
+
+The LinkedIn scraper produces a CSV file with the following columns:
+
+| Column | Description |
+|---|---|
+| `keyword` | The search keyword used |
+| `post_url` | Direct URL of the LinkedIn post |
+| `author_name` | Full name of the post author |
+| `author_title` | Author's headline / job title |
+| `author_company` | Company extracted from the author's headline |
+| `author_profile` | Author's LinkedIn profile URL |
+| `email` | Semicolon-separated emails found in the post text |
+| `phone` | Semicolon-separated phone numbers found in the post text |
+| `hr_signal` | `yes` if the post contains hiring / HR keywords, otherwise empty |
+| `post_text` | Full text of the post |
+| `lead_score` | Numeric quality score (higher is better) |
+
+> **Note:** The lead score is calculated as: +4 per email found, +2 per phone found, +2 if an HR signal is detected, +1 if the author's company is known.
+
+---
+
+## Running the Tests
 
 ```bash
 python -m pytest test_google_maps_scraper.py
