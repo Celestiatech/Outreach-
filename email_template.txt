@@ -1,15 +1,17 @@
-Hi {name},
+Hey {name},
 
-I came across {url} and wanted to reach out.
+Came across {url} and spotted a few quick wins that could help you get more customers:
 
-We help businesses like yours improve their online presence and generate more leads.
-I noticed a few things that could be quickly improved on your site – would you be open
-to a free 15-minute review call this week?
+{issues}
 
-Looking forward to hearing from you.
+{proof}
 
-Best regards,
-{from_name}
+{offer}
+
+{cta}
+
+{booking_url}
+– {from_name}
 
 ---
-To unsubscribe from these emails, simply reply with "unsubscribe" in the subject line.
+To unsubscribe, reply with "unsubscribe" in the subject line.

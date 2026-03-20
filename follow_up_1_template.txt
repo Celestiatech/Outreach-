@@ -1,0 +1,17 @@
+Hey {name},
+
+Just following up — wanted to make sure my last message didn't get buried.
+
+I spotted {issues} on {url} and thought it was worth a quick note.
+
+{proof}
+
+{offer}
+
+{cta}
+
+{booking_url}
+– {from_name}
+
+---
+To unsubscribe, reply with "unsubscribe" in the subject line.

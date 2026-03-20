@@ -1,0 +1,15 @@
+Hey {name},
+
+Last one from me — I promise.
+
+I reached out twice about {url} and the quick wins I spotted. Totally understand if the timing isn't right.
+
+{offer}
+
+If that ever sounds useful, just reply and I'll jump in — no pressure, no pitch deck.
+
+{booking_url}
+– {from_name}
+
+---
+To unsubscribe, reply with "unsubscribe" in the subject line.

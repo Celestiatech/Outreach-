@@ -79,9 +79,106 @@ PHONE_REGEX = re.compile(
 SCORE_HAS_EMAIL = 3
 SCORE_HAS_PHONE = 2
 SCORE_HAS_WEBSITE = 1
+SCORE_HAS_WHATSAPP = 3    # WhatsApp = direct, high-conversion channel
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1
 SCORE_PER_ISSUE = -1
+SCORE_URGENCY_BONUS = 2   # keyword or listing name contains buyer-intent / urgency signal
+SCORE_OPPORTUNITY_BONUS = 2   # flat bonus when ANY website issues are found
+SCORE_OPPORTUNITY_PER_ISSUE = 1  # each additional issue = one more pain point to pitch
+
+# Slow page-load threshold (seconds).
+SLOW_PAGE_THRESHOLD = 3.0
+
+# Words that indicate a buyer or urgent intent in the keyword / listing name.
+URGENCY_KEYWORDS: tuple[str, ...] = (
+    "urgent", "urgently", "asap", "immediately", "right away",
+    "looking for", "need help", "hire ", "hiring", "needed",
+    "required", "requirement", "project available",
+    "developer needed", "designer needed", "web developer",
+    "need website", "need seo", "need developer",
+    "website needed", "redesign needed", "freelancer needed",
+)
+
+# Call-to-action patterns we expect to find on a well-optimised site.
+_CTA_PATTERN = re.compile(
+    r"\b(book|get started|buy now|order now|sign up|contact us|call us|"
+    r"free trial|get a quote|request a quote|schedule|get in touch|"
+    r"start now|try free|claim|reserve)\b",
+    re.I,
+)
+
+
+def _urgency_bonus(keyword: str, name: str = "") -> int:
+    """Return ``SCORE_URGENCY_BONUS`` if *keyword* or *name* contain an urgency signal."""
+    combined = f"{keyword} {name}".lower()
+    if any(kw in combined for kw in URGENCY_KEYWORDS):
+        return SCORE_URGENCY_BONUS
+    return 0
+
+
+def _website_opportunity_score(data: dict) -> int:
+    """
+    Return an *opportunity* bonus based on website issues found.
+
+    Issues represent pain points that can be pitched in outreach.  This is
+    intentionally separate from :func:`score_lead` so that contact-quality
+    is not conflated with outreach-opportunity.
+
+    * ``+2`` flat bonus when ANY issues are present
+    * ``+1`` for each individual issue (stacks)
+    """
+    issues = data.get("issues", [])
+    if not issues:
+        return 0
+    return SCORE_OPPORTUNITY_BONUS + len(issues) * SCORE_OPPORTUNITY_PER_ISSUE
+
+
+def _extract_city(address: str) -> str:
+    """
+    Return the most likely city name from a comma-separated *address* string.
+
+    Takes the second segment (index 1) when the address has multiple parts,
+    which covers the common ``"Street, City, Postcode"`` pattern.
+    """
+    if not address:
+        return ""
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    return parts[1] if len(parts) > 1 else ""
+
+
+# WhatsApp extraction regexes.
+_WA_LINK_RE = re.compile(r'wa\.me/(\d+)', re.I)
+_WA_API_RE = re.compile(r'api\.whatsapp\.com/send\?phone=(\d+)', re.I)
+_PHONE_DIGITS_RE = re.compile(r'\+?\d[\d\s\-]{8,15}')
+
+
+def extract_whatsapp(html: str) -> str:
+    """
+    Return the first WhatsApp-reachable number found in *html*, or ``""``.
+
+    Detection order (most → least reliable):
+    1. ``wa.me/<number>`` links
+    2. ``api.whatsapp.com/send?phone=<number>`` links
+    3. General phone-number pattern (10–15 digits after stripping non-digits)
+
+    The returned value is always digits-only.
+    """
+    numbers: list[str] = []
+
+    # 1 – wa.me links
+    numbers.extend(_WA_LINK_RE.findall(html))
+
+    # 2 – api.whatsapp.com links
+    numbers.extend(_WA_API_RE.findall(html))
+
+    # 3 – general phone numbers
+    for raw in _PHONE_DIGITS_RE.findall(html):
+        clean = re.sub(r"\D", "", raw)
+        if 10 <= len(clean) <= 15:
+            numbers.append(clean)
+
+    return numbers[0] if numbers else ""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -160,9 +257,19 @@ def _is_safe_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def analyze_website(url: str, html: str) -> list[str]:
+def analyze_website(url: str, html: str, response_time: float | None = None) -> list[str]:
     """
     Inspect *url* and its *html* content for common issues.
+
+    Parameters
+    ----------
+    url:
+        The URL that was fetched (used to check the scheme).
+    html:
+        Raw HTML source of the page.
+    response_time:
+        Optional page load time in seconds.  When provided and above
+        ``SLOW_PAGE_THRESHOLD``, a "Slow page load" issue is added.
 
     Issues checked
     ~~~~~~~~~~~~~~
@@ -170,6 +277,9 @@ def analyze_website(url: str, html: str) -> list[str]:
     * Missing ``<title>`` tag
     * Missing ``<meta name="description">`` tag
     * No contact page link found anywhere on the page
+    * No mobile viewport ``<meta name="viewport">`` tag
+    * No clear call-to-action (CTA) text on the page
+    * Slow page load (when ``response_time`` is provided)
     """
     issues: list[str] = []
 
@@ -190,6 +300,23 @@ def analyze_website(url: str, html: str) -> list[str]:
         contact_link = soup.find("a", href=re.compile(r"contact", re.I))
     if not contact_link:
         issues.append("No contact page link found")
+
+    # --- Mobile viewport check ---
+    viewport_meta = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
+    if not viewport_meta:
+        issues.append("Not mobile-optimized (no viewport meta)")
+
+    # --- Call-to-action check ---
+    cta_found = bool(
+        soup.find(["button", "a"], string=_CTA_PATTERN)
+        or soup.find(["button", "a"], attrs={"class": _CTA_PATTERN})
+    )
+    if not cta_found:
+        issues.append("No clear call-to-action (CTA)")
+
+    # --- Page speed check ---
+    if response_time is not None and response_time > SLOW_PAGE_THRESHOLD:
+        issues.append(f"Slow page load ({response_time:.1f}s)")
 
     return issues
 
@@ -265,6 +392,7 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
     result: dict = {
         "emails": set(),
         "phone": "",
+        "whatsapp_number": "",
         "linkedin": "",
         "twitter": "",
         "facebook": "",
@@ -278,7 +406,9 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
         return result
 
     try:
+        _start = time.time()
         response = session.get(url, timeout=15, allow_redirects=True)
+        response_time = time.time() - _start
         response.raise_for_status()
     except requests.TooManyRedirects:
         logger.warning("Too many redirects for %s – skipping.", url)
@@ -294,11 +424,12 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
 
     result["emails"] = _extract_emails_from_soup(soup)
     result["phone"] = _extract_phone_from_soup(soup)
+    result["whatsapp_number"] = extract_whatsapp(html)
     result.update(_extract_social_links(soup))
 
     contact_url = _find_contact_page_url(url, soup)
     result["contact_page"] = contact_url
-    result["issues"] = analyze_website(url, html)
+    result["issues"] = analyze_website(url, html, response_time=response_time)
 
     if contact_url and contact_url != url:
         logger.info("Visiting contact page: %s", contact_url)
@@ -311,6 +442,9 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
             result["emails"].update(_extract_emails_from_soup(contact_soup))
             if not result["phone"]:
                 result["phone"] = _extract_phone_from_soup(contact_soup)
+            # Prefer WhatsApp from contact page if homepage had none.
+            if not result["whatsapp_number"]:
+                result["whatsapp_number"] = extract_whatsapp(contact_resp.text)
         except requests.RequestException as exc:
             logger.warning("Could not fetch contact page %s – %s", contact_url, exc)
 
@@ -328,6 +462,7 @@ def score_lead(data: dict) -> int:
 
     * ``+3`` if at least one email address was found
     * ``+2`` if a phone number was found
+    * ``+3`` if a WhatsApp number was found (direct, high-conversion channel)
     * ``+1`` if a website is listed on Google Maps
     * ``+1`` if a LinkedIn profile was found
     * ``+1`` if any other social media link was found
@@ -338,6 +473,8 @@ def score_lead(data: dict) -> int:
         score += SCORE_HAS_EMAIL
     if data.get("phone"):
         score += SCORE_HAS_PHONE
+    if data.get("whatsapp_number"):
+        score += SCORE_HAS_WHATSAPP
     if data.get("website"):
         score += SCORE_HAS_WEBSITE
     if data.get("linkedin"):
@@ -378,9 +515,9 @@ def is_qualified_lead(record: dict) -> bool:
     Return *True* if *record* is a qualified lead.
 
     A lead is qualified when at least one meaningful contact channel is
-    present – either an e-mail address or a phone number.
+    present – an e-mail address, a phone number, or a WhatsApp number.
     """
-    return bool(record.get("email") or record.get("phone"))
+    return bool(record.get("email") or record.get("phone") or record.get("whatsapp_number"))
 
 
 # Keyword suffixes tried in order when the primary keyword doesn't yield enough
@@ -646,6 +783,7 @@ def scrape_google_maps(
             enrichment: dict = {
                 "emails": set(),
                 "phone_web": "",
+                "whatsapp_number": "",
                 "linkedin": "",
                 "twitter": "",
                 "facebook": "",
@@ -658,6 +796,7 @@ def scrape_google_maps(
                 raw = enrich_from_website(website, http_session)
                 enrichment["emails"] = raw["emails"]
                 enrichment["phone_web"] = raw["phone"]
+                enrichment["whatsapp_number"] = raw["whatsapp_number"]
                 enrichment["linkedin"] = raw["linkedin"]
                 enrichment["twitter"] = raw["twitter"]
                 enrichment["facebook"] = raw["facebook"]
@@ -671,6 +810,7 @@ def scrape_google_maps(
             lead_data = {
                 "website": website,
                 "phone": final_phone,
+                "whatsapp_number": enrichment["whatsapp_number"],
                 "emails": enrichment["emails"],
                 "linkedin": enrichment["linkedin"],
                 "twitter": enrichment["twitter"],
@@ -678,13 +818,23 @@ def scrape_google_maps(
                 "instagram": enrichment["instagram"],
                 "issues": enrichment["issues"],
             }
-            lead_score = score_lead(lead_data)
+            lead_score = (
+                score_lead(lead_data)
+                + _website_opportunity_score(lead_data)
+                + _urgency_bonus(keyword, name)
+            )
 
+            wa = enrichment["whatsapp_number"]
             base = {
+                "source": "Google Maps",
                 "keyword": keyword,
+                "niche": category or "",
+                "city": _extract_city(address),
                 "name": name,
                 "address": address,
                 "phone": final_phone,
+                "whatsapp_number": wa,
+                "has_whatsapp": "true" if wa else "false",
                 "website": website,
                 "rating": rating,
                 "reviews": reviews,
@@ -844,7 +994,8 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "keyword", "name", "address", "phone", "website",
+        "source", "keyword", "niche", "city", "name", "address", "phone",
+        "whatsapp_number", "has_whatsapp", "website",
         "rating", "reviews", "category", "email",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
@@ -936,6 +1087,10 @@ def main() -> None:
         "Done. %d total row(s) saved (%d qualified lead(s)).",
         len(records), qualified,
     )
+
+
+# Convenience alias used by the Streamlit app and other callers.
+scrape = scrape_google_maps
 
 
 if __name__ == "__main__":

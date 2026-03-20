@@ -27,6 +27,7 @@ SAMPLE_HTML_WITH_CONTACT = """
 <head>
   <title>Acme Agency – Digital Marketing London</title>
   <meta name="description" content="Award-winning digital agency.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
 <body>
   <a href="mailto:hello@acme.co.uk">hello@acme.co.uk</a>
@@ -38,6 +39,7 @@ SAMPLE_HTML_WITH_CONTACT = """
   <a href="https://www.facebook.com/acme">Facebook</a>
   <a href="https://www.instagram.com/acme">Instagram</a>
   <p>You can also reach us at support@acme.co.uk or call us.</p>
+  <a href="/contact">Get in touch</a>
 </body>
 </html>
 """
@@ -267,6 +269,62 @@ class TestAnalyzeWebsite(unittest.TestCase):
         issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
         self.assertEqual(issues, [])
 
+    def test_missing_viewport_flagged(self):
+        html = """
+        <html>
+        <head>
+          <title>T</title>
+          <meta name="description" content="D">
+        </head>
+        <body>
+          <a href="/contact">Contact</a>
+          <a href="/contact">Get in touch</a>
+        </body>
+        </html>
+        """
+        issues = gms.analyze_website("https://example.com", html)
+        self.assertIn("Not mobile-optimized (no viewport meta)", issues)
+
+    def test_viewport_present_no_issue(self):
+        issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
+        self.assertNotIn("Not mobile-optimized (no viewport meta)", issues)
+
+    def test_missing_cta_flagged(self):
+        html = """
+        <html>
+        <head>
+          <title>T</title>
+          <meta name="description" content="D">
+          <meta name="viewport" content="width=device-width">
+        </head>
+        <body>
+          <a href="/contact">Contact</a>
+        </body>
+        </html>
+        """
+        issues = gms.analyze_website("https://example.com", html)
+        self.assertIn("No clear call-to-action (CTA)", issues)
+
+    def test_cta_present_no_issue(self):
+        issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
+        self.assertNotIn("No clear call-to-action (CTA)", issues)
+
+    def test_slow_page_load_flagged(self):
+        issues = gms.analyze_website(
+            "https://example.com", SAMPLE_HTML_WITH_CONTACT, response_time=4.2
+        )
+        self.assertTrue(any("Slow page load" in i for i in issues))
+
+    def test_fast_page_load_no_issue(self):
+        issues = gms.analyze_website(
+            "https://example.com", SAMPLE_HTML_WITH_CONTACT, response_time=1.0
+        )
+        self.assertFalse(any("Slow page load" in i for i in issues))
+
+    def test_response_time_none_no_speed_issue(self):
+        issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
+        self.assertFalse(any("Slow page load" in i for i in issues))
+
 
 # ---------------------------------------------------------------------------
 # score_lead
@@ -330,6 +388,172 @@ class TestScoreLead(unittest.TestCase):
         }
         # Only 1 point for "any social" even if multiple platforms present
         self.assertEqual(gms.score_lead(data), 1)
+
+
+# ---------------------------------------------------------------------------
+# _website_opportunity_score
+# ---------------------------------------------------------------------------
+
+class TestWebsiteOpportunityScore(unittest.TestCase):
+
+    def test_no_issues_returns_zero(self):
+        self.assertEqual(gms._website_opportunity_score({"issues": []}), 0)
+
+    def test_empty_dict_returns_zero(self):
+        self.assertEqual(gms._website_opportunity_score({}), 0)
+
+    def test_one_issue_returns_flat_plus_one(self):
+        # flat bonus 2 + 1 issue * 1 = 3
+        self.assertEqual(gms._website_opportunity_score({"issues": ["No SSL"]}), 3)
+
+    def test_three_issues_stack(self):
+        # flat bonus 2 + 3 * 1 = 5
+        self.assertEqual(
+            gms._website_opportunity_score({"issues": ["A", "B", "C"]}), 5
+        )
+
+
+# ---------------------------------------------------------------------------
+# _extract_city
+# ---------------------------------------------------------------------------
+
+class TestExtractCity(unittest.TestCase):
+
+    def test_typical_uk_address(self):
+        self.assertEqual(gms._extract_city("10 High Street, London, W1A 1AA"), "London")
+
+    def test_two_part_address(self):
+        self.assertEqual(gms._extract_city("Main Road, Manchester"), "Manchester")
+
+    def test_single_part_returns_empty(self):
+        self.assertEqual(gms._extract_city("London"), "")
+
+    def test_empty_string_returns_empty(self):
+        self.assertEqual(gms._extract_city(""), "")
+
+    def test_us_address(self):
+        self.assertEqual(gms._extract_city("100 Park Ave, New York, NY 10001"), "New York")
+
+
+# ---------------------------------------------------------------------------
+# extract_whatsapp
+# ---------------------------------------------------------------------------
+
+class TestExtractWhatsapp(unittest.TestCase):
+
+    def test_wa_me_link(self):
+        html = '<a href="https://wa.me/447911123456">Chat on WhatsApp</a>'
+        self.assertEqual(gms.extract_whatsapp(html), "447911123456")
+
+    def test_api_whatsapp_link(self):
+        html = '<a href="https://api.whatsapp.com/send?phone=447911123456">Message us</a>'
+        self.assertEqual(gms.extract_whatsapp(html), "447911123456")
+
+    def test_wa_me_preferred_over_phone(self):
+        html = (
+            '<a href="https://wa.me/447911000001">WhatsApp</a>'
+            '<p>Call us on +44 1234 567890</p>'
+        )
+        # wa.me number should come first
+        self.assertEqual(gms.extract_whatsapp(html), "447911000001")
+
+    def test_general_phone_fallback(self):
+        html = "<p>Call us on +44 7911 123456 today.</p>"
+        result = gms.extract_whatsapp(html)
+        self.assertTrue(len(result) >= 10)
+        self.assertTrue(result.isdigit())
+
+    def test_no_number_returns_empty(self):
+        self.assertEqual(gms.extract_whatsapp("<p>No contact here.</p>"), "")
+
+    def test_returns_digits_only(self):
+        html = '<a href="https://wa.me/44-791-1123456">WA</a>'
+        result = gms.extract_whatsapp(html)
+        self.assertTrue(result.isdigit() or result == "")
+
+    def test_short_number_ignored(self):
+        # 5-digit number – too short, should not be returned via phone path
+        html = "<p>Call 12345</p>"
+        result = gms.extract_whatsapp(html)
+        # No wa.me / api link, and 12345 has only 5 digits (<10) so should be ""
+        self.assertEqual(result, "")
+
+
+# ---------------------------------------------------------------------------
+# score_lead – WhatsApp bonus
+# ---------------------------------------------------------------------------
+
+class TestScoreLeadWhatsApp(unittest.TestCase):
+
+    def test_whatsapp_adds_three(self):
+        data = {
+            "emails": set(),
+            "phone": "",
+            "whatsapp_number": "447911123456",
+            "website": "",
+            "linkedin": "",
+            "twitter": "",
+            "facebook": "",
+            "instagram": "",
+            "issues": [],
+        }
+        self.assertEqual(gms.score_lead(data), gms.SCORE_HAS_WHATSAPP)
+
+    def test_whatsapp_stacks_with_email_and_phone(self):
+        data = {
+            "emails": {"a@b.com"},
+            "phone": "+44123",
+            "whatsapp_number": "447911123456",
+            "website": "",
+            "linkedin": "",
+            "twitter": "",
+            "facebook": "",
+            "instagram": "",
+            "issues": [],
+        }
+        # 3 (email) + 2 (phone) + 3 (WhatsApp) = 8
+        self.assertEqual(
+            gms.score_lead(data),
+            gms.SCORE_HAS_EMAIL + gms.SCORE_HAS_PHONE + gms.SCORE_HAS_WHATSAPP,
+        )
+
+    def test_no_whatsapp_no_bonus(self):
+        data = {
+            "emails": set(),
+            "phone": "",
+            "whatsapp_number": "",
+            "website": "",
+            "linkedin": "",
+            "twitter": "",
+            "facebook": "",
+            "instagram": "",
+            "issues": [],
+        }
+        self.assertEqual(gms.score_lead(data), 0)
+
+
+# ---------------------------------------------------------------------------
+# is_qualified_lead – now includes WhatsApp
+# ---------------------------------------------------------------------------
+
+class TestIsQualifiedLead(unittest.TestCase):
+
+    def test_email_qualifies(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "a@b.com", "phone": ""}))
+
+    def test_phone_qualifies(self):
+        self.assertTrue(gms.is_qualified_lead({"email": "", "phone": "+44123"}))
+
+    def test_whatsapp_qualifies(self):
+        self.assertTrue(gms.is_qualified_lead(
+            {"email": "", "phone": "", "whatsapp_number": "447911123456"}
+        ))
+
+    def test_empty_record_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({"email": "", "phone": "", "whatsapp_number": ""}))
+
+    def test_missing_keys_not_qualified(self):
+        self.assertFalse(gms.is_qualified_lead({}))
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +775,7 @@ class TestScrapeGoogleMaps(unittest.TestCase):
         mock_enrich.return_value = {
             "emails": {"contact@example.com"},
             "phone": "",
+            "whatsapp_number": "",
             "linkedin": "https://linkedin.com/company/biz",
             "twitter": "",
             "facebook": "",
@@ -663,7 +888,7 @@ class TestScrapeGoogleMaps(unittest.TestCase):
         """When the results feed yields no links, return an empty list."""
         mock_session.return_value = MagicMock()
         mock_enrich.return_value = {
-            "emails": set(), "phone": "", "linkedin": "",
+            "emails": set(), "phone": "", "whatsapp_number": "", "linkedin": "",
             "twitter": "", "facebook": "", "instagram": "",
             "contact_page": "", "issues": [],
         }
@@ -734,7 +959,7 @@ class TestScrapeGoogleMaps(unittest.TestCase):
         """Listings without a website URL should skip enrich_from_website."""
         mock_session.return_value = MagicMock()
         mock_enrich.return_value = {
-            "emails": set(), "phone": "", "linkedin": "",
+            "emails": set(), "phone": "", "whatsapp_number": "", "linkedin": "",
             "twitter": "", "facebook": "", "instagram": "",
             "contact_page": "", "issues": [],
         }
