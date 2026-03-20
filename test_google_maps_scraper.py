@@ -27,6 +27,7 @@ SAMPLE_HTML_WITH_CONTACT = """
 <head>
   <title>Acme Agency – Digital Marketing London</title>
   <meta name="description" content="Award-winning digital agency.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
 <body>
   <a href="mailto:hello@acme.co.uk">hello@acme.co.uk</a>
@@ -38,6 +39,7 @@ SAMPLE_HTML_WITH_CONTACT = """
   <a href="https://www.facebook.com/acme">Facebook</a>
   <a href="https://www.instagram.com/acme">Instagram</a>
   <p>You can also reach us at support@acme.co.uk or call us.</p>
+  <a href="/contact">Get in touch</a>
 </body>
 </html>
 """
@@ -267,6 +269,62 @@ class TestAnalyzeWebsite(unittest.TestCase):
         issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
         self.assertEqual(issues, [])
 
+    def test_missing_viewport_flagged(self):
+        html = """
+        <html>
+        <head>
+          <title>T</title>
+          <meta name="description" content="D">
+        </head>
+        <body>
+          <a href="/contact">Contact</a>
+          <a href="/contact">Get in touch</a>
+        </body>
+        </html>
+        """
+        issues = gms.analyze_website("https://example.com", html)
+        self.assertIn("Not mobile-optimized (no viewport meta)", issues)
+
+    def test_viewport_present_no_issue(self):
+        issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
+        self.assertNotIn("Not mobile-optimized (no viewport meta)", issues)
+
+    def test_missing_cta_flagged(self):
+        html = """
+        <html>
+        <head>
+          <title>T</title>
+          <meta name="description" content="D">
+          <meta name="viewport" content="width=device-width">
+        </head>
+        <body>
+          <a href="/contact">Contact</a>
+        </body>
+        </html>
+        """
+        issues = gms.analyze_website("https://example.com", html)
+        self.assertIn("No clear call-to-action (CTA)", issues)
+
+    def test_cta_present_no_issue(self):
+        issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
+        self.assertNotIn("No clear call-to-action (CTA)", issues)
+
+    def test_slow_page_load_flagged(self):
+        issues = gms.analyze_website(
+            "https://example.com", SAMPLE_HTML_WITH_CONTACT, response_time=4.2
+        )
+        self.assertTrue(any("Slow page load" in i for i in issues))
+
+    def test_fast_page_load_no_issue(self):
+        issues = gms.analyze_website(
+            "https://example.com", SAMPLE_HTML_WITH_CONTACT, response_time=1.0
+        )
+        self.assertFalse(any("Slow page load" in i for i in issues))
+
+    def test_response_time_none_no_speed_issue(self):
+        issues = gms.analyze_website("https://example.com", SAMPLE_HTML_WITH_CONTACT)
+        self.assertFalse(any("Slow page load" in i for i in issues))
+
 
 # ---------------------------------------------------------------------------
 # score_lead
@@ -333,8 +391,51 @@ class TestScoreLead(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# enrich_from_website  (HTTP fully mocked)
+# _website_opportunity_score
 # ---------------------------------------------------------------------------
+
+class TestWebsiteOpportunityScore(unittest.TestCase):
+
+    def test_no_issues_returns_zero(self):
+        self.assertEqual(gms._website_opportunity_score({"issues": []}), 0)
+
+    def test_empty_dict_returns_zero(self):
+        self.assertEqual(gms._website_opportunity_score({}), 0)
+
+    def test_one_issue_returns_flat_plus_one(self):
+        # flat bonus 2 + 1 issue * 1 = 3
+        self.assertEqual(gms._website_opportunity_score({"issues": ["No SSL"]}), 3)
+
+    def test_three_issues_stack(self):
+        # flat bonus 2 + 3 * 1 = 5
+        self.assertEqual(
+            gms._website_opportunity_score({"issues": ["A", "B", "C"]}), 5
+        )
+
+
+# ---------------------------------------------------------------------------
+# _extract_city
+# ---------------------------------------------------------------------------
+
+class TestExtractCity(unittest.TestCase):
+
+    def test_typical_uk_address(self):
+        self.assertEqual(gms._extract_city("10 High Street, London, W1A 1AA"), "London")
+
+    def test_two_part_address(self):
+        self.assertEqual(gms._extract_city("Main Road, Manchester"), "Manchester")
+
+    def test_single_part_returns_empty(self):
+        self.assertEqual(gms._extract_city("London"), "")
+
+    def test_empty_string_returns_empty(self):
+        self.assertEqual(gms._extract_city(""), "")
+
+    def test_us_address(self):
+        self.assertEqual(gms._extract_city("100 Park Ave, New York, NY 10001"), "New York")
+
+
+
 
 class TestEnrichFromWebsite(unittest.TestCase):
 

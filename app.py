@@ -44,18 +44,19 @@ st.set_page_config(
 LEADS_CSV = "leads.csv"           # staging / most-recent scrape
 LIVE_LEADS_CSV = "live_leads.csv" # permanent cumulative store
 SENT_LOG_CSV = "sent_log.csv"
+REPLIES_LOG_CSV = "replies_log.csv"  # cumulative log of lead replies detected
 UNSUBSCRIBE_TXT = "unsubscribe.txt"
 EMAIL_TEMPLATE_TXT = "email_template.txt"
 
 BING_FIELDNAMES = [
-    "source", "keyword", "url", "title", "email", "phone",
+    "source", "keyword", "niche", "url", "title", "email", "phone",
     "linkedin", "twitter", "facebook", "instagram",
     "contact_page", "issues", "lead_score",
 ]
 MAPS_FIELDNAMES = [
-    "source", "keyword", "name", "address", "phone", "website", "rating", "reviews",
-    "category", "email", "linkedin", "twitter", "facebook", "instagram",
-    "contact_page", "issues", "lead_score",
+    "source", "keyword", "niche", "city", "name", "address", "phone", "website",
+    "rating", "reviews", "category", "email", "linkedin", "twitter", "facebook",
+    "instagram", "contact_page", "issues", "lead_score",
 ]
 
 # ---------------------------------------------------------------------------
@@ -513,6 +514,70 @@ def tab_dashboard() -> None:
                 if not src_email.empty:
                     st.bar_chart(src_email.set_index("source")["with_email"])
 
+    # --- Reply intelligence ---
+    replies_df = _read_csv(REPLIES_LOG_CSV)
+    if not replies_df.empty and "from_email" in replies_df.columns:
+        st.divider()
+        st.subheader("📬 Reply Intelligence")
+        st.caption(
+            "Cross-references detected lead replies with your leads database "
+            "to show which keywords and sources are generating responses."
+        )
+
+        ri_col1, ri_col2 = st.columns(2)
+
+        # Join replies with leads by email to get keyword/source per reply
+        if not leads_df.empty and "email" in leads_df.columns:
+            lead_meta = (
+                leads_df[["email", "keyword", "source"]]
+                .drop_duplicates(subset=["email"])
+                .copy()
+            )
+            lead_meta["email"] = lead_meta["email"].str.lower().str.strip()
+            replies_joined = replies_df.copy()
+            replies_joined["from_email"] = replies_joined["from_email"].str.lower().str.strip()
+            replies_joined = replies_joined.merge(
+                lead_meta,
+                left_on="from_email",
+                right_on="email",
+                how="left",
+            )
+
+            with ri_col1:
+                st.write("**Replies by keyword**")
+                kw_replies = (
+                    replies_joined["keyword"]
+                    .replace("", pd.NA)
+                    .dropna()
+                    .value_counts()
+                    .head(15)
+                    .rename_axis("keyword")
+                    .reset_index(name="replies")
+                )
+                if not kw_replies.empty:
+                    st.bar_chart(kw_replies.set_index("keyword")["replies"])
+                else:
+                    st.info("No keyword data available yet.", icon="📊")
+
+            with ri_col2:
+                st.write("**Replies by source**")
+                src_replies = (
+                    replies_joined["source"]
+                    .replace("", pd.NA)
+                    .dropna()
+                    .value_counts()
+                    .rename_axis("source")
+                    .reset_index(name="replies")
+                )
+                if not src_replies.empty:
+                    st.bar_chart(src_replies.set_index("source")["replies"])
+                else:
+                    st.info("No source data available yet.", icon="📊")
+        else:
+            with ri_col1:
+                st.info("Scrape leads to enable reply attribution.", icon="🔍")
+
+
 
 # ---------------------------------------------------------------------------
 # Tab: Unsubscribe Manager
@@ -888,7 +953,7 @@ def tab_leads() -> None:
 
     # Filters
     with st.expander("Filters", expanded=True):
-        fcol1, fcol2, fcol3 = st.columns(3)
+        fcol1, fcol2, fcol3, fcol4 = st.columns(4)
         with fcol1:
             has_email = st.checkbox("Only rows with email", value=False)
         with fcol2:
@@ -908,6 +973,16 @@ def tab_leads() -> None:
             if category_col:
                 cats = ["(all)"] + sorted(df[category_col].dropna().unique().tolist())
                 category_filter = st.selectbox("Category", cats)
+        with fcol4:
+            tier_filter = st.selectbox(
+                "Lead tier",
+                ["All", "🔥 Hot (score ≥ 7)", "🟡 Warm (4–6)", "🧊 Cold (< 4)"],
+                help=(
+                    "🔥 Hot: score ≥ 7 — high urgency / many issues / contact info found.\n\n"
+                    "🟡 Warm: score 4–6 — decent signals but not urgent.\n\n"
+                    "🧊 Cold: score < 4 — limited contact info or few opportunity signals."
+                ),
+            )
 
     filtered = df.copy()
     if has_email and "email" in filtered.columns:
@@ -916,6 +991,33 @@ def tab_leads() -> None:
         filtered = filtered[pd.to_numeric(filtered["lead_score"], errors="coerce").fillna(0) >= min_score]
     if category_col and category_filter and category_filter != "(all)":
         filtered = filtered[filtered[category_col] == category_filter]
+    if "lead_score" in filtered.columns and tier_filter != "All":
+        _numeric_score = pd.to_numeric(filtered["lead_score"], errors="coerce").fillna(0)
+        if "Hot" in tier_filter:
+            filtered = filtered[_numeric_score >= 7]
+        elif "Warm" in tier_filter:
+            filtered = filtered[(_numeric_score >= 4) & (_numeric_score < 7)]
+        elif "Cold" in tier_filter:
+            filtered = filtered[_numeric_score < 4]
+
+    # Default: sort by lead score descending so best leads appear first.
+    if "lead_score" in filtered.columns:
+        filtered = filtered.copy()
+        filtered["_sort_score"] = pd.to_numeric(filtered["lead_score"], errors="coerce").fillna(0)
+        filtered = filtered.sort_values("_sort_score", ascending=False).drop(columns=["_sort_score"])
+
+    # Tier badge shown inline
+    tier_counts: dict = {}
+    if "lead_score" in df.columns:
+        all_scores = pd.to_numeric(df["lead_score"], errors="coerce").fillna(0)
+        tier_counts = {
+            "🔥 Hot": int((all_scores >= 7).sum()),
+            "🟡 Warm": int(((all_scores >= 4) & (all_scores < 7)).sum()),
+            "🧊 Cold": int((all_scores < 4).sum()),
+        }
+    if tier_counts:
+        badges = "  ·  ".join(f"{t} **{c:,}**" for t, c in tier_counts.items())
+        st.caption(f"Tier breakdown: {badges}")
 
     st.write(f"**{len(filtered)} rows after filters**")
 
@@ -1310,9 +1412,35 @@ def tab_replies() -> None:
             st.error(f"IMAP error: {error_holder[0]}")
             return
 
+        # --- Persist lead replies to replies_log.csv ---
+        if lead_replies:
+            replies_log_path = Path(REPLIES_LOG_CSV)
+            now_ts = datetime.now(timezone.utc).isoformat()
+            log_exists = replies_log_path.exists() and replies_log_path.stat().st_size > 0
+            with replies_log_path.open("a", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(
+                    fh,
+                    fieldnames=["logged_at", "from_email", "name", "subject", "date"],
+                )
+                if not log_exists:
+                    writer.writeheader()
+                for r in lead_replies:
+                    writer.writerow({
+                        "logged_at": now_ts,
+                        "from_email": r["from"],
+                        "name": r["name"],
+                        "subject": r["subject"],
+                        "date": r["date"],
+                    })
+
         st.subheader(f"Replies from leads ({len(lead_replies)})")
         if lead_replies:
             st.dataframe(pd.DataFrame(lead_replies), use_container_width=True)
+            st.success(
+                f"✅ {len(lead_replies)} lead reply(ies) logged to `{REPLIES_LOG_CSV}` "
+                "for dashboard analytics.",
+                icon="📝",
+            )
         else:
             st.info("No replies from known leads found.")
 

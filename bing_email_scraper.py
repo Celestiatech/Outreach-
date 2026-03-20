@@ -90,8 +90,13 @@ SCORE_HAS_EMAIL = 3
 SCORE_HAS_PHONE = 2
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1      # Twitter / Facebook / Instagram combined
-SCORE_PER_ISSUE = -1      # deducted for every detected issue
+SCORE_PER_ISSUE = -1      # deducted for every detected issue (contact-quality signal)
 SCORE_URGENCY_BONUS = 2   # keyword or page title contains buyer-intent / urgency signal
+SCORE_OPPORTUNITY_BONUS = 2   # flat bonus when ANY website issues are found
+SCORE_OPPORTUNITY_PER_ISSUE = 1  # each additional issue = one more pain point to pitch
+
+# Slow page-load threshold (seconds) above which a warning issue is added.
+SLOW_PAGE_THRESHOLD = 3.0
 
 # Words that indicate a buyer or urgent intent in the keyword / page title.
 URGENCY_KEYWORDS: tuple[str, ...] = (
@@ -103,6 +108,14 @@ URGENCY_KEYWORDS: tuple[str, ...] = (
     "website needed", "redesign needed", "freelancer needed",
 )
 
+# Call-to-action patterns we expect to find on a well-optimised site.
+_CTA_PATTERN = re.compile(
+    r"\b(book|get started|buy now|order now|sign up|contact us|call us|"
+    r"free trial|get a quote|request a quote|schedule|get in touch|"
+    r"start now|try free|claim|reserve)\b",
+    re.I,
+)
+
 
 def _urgency_bonus(keyword: str, title: str = "") -> int:
     """Return ``SCORE_URGENCY_BONUS`` if *keyword* or *title* contain an urgency signal."""
@@ -110,6 +123,79 @@ def _urgency_bonus(keyword: str, title: str = "") -> int:
     if any(kw in combined for kw in URGENCY_KEYWORDS):
         return SCORE_URGENCY_BONUS
     return 0
+
+
+def _website_opportunity_score(data: dict) -> int:
+    """
+    Return an *opportunity* bonus based on website issues found.
+
+    Every issue detected by :func:`analyze_website` represents a pain point
+    that can be pitched in outreach.  The more issues, the stronger the
+    opportunity:
+
+    * ``+2`` flat bonus when ANY issues are present
+    * ``+1`` for each individual issue (stacks)
+
+    This is intentionally separate from :func:`score_lead` so that the
+    contact-quality score is not conflated with the outreach-opportunity score.
+    """
+    issues = data.get("issues", [])
+    if not issues:
+        return 0
+    return SCORE_OPPORTUNITY_BONUS + len(issues) * SCORE_OPPORTUNITY_PER_ISSUE
+
+
+# Niche keyword map: substring → clean label used in email personalisation.
+_NICHE_MAP: tuple[tuple[str, str], ...] = (
+    ("dentist", "dental"),
+    ("dental", "dental"),
+    ("gym", "fitness"),
+    ("fitness", "fitness"),
+    ("personal trainer", "fitness"),
+    ("real estate", "real estate"),
+    ("estate agent", "real estate"),
+    ("property", "real estate"),
+    ("restaurant", "restaurant"),
+    ("cafe", "restaurant"),
+    ("plumber", "plumbing"),
+    ("plumbing", "plumbing"),
+    ("accountant", "accounting"),
+    ("accounting", "accounting"),
+    ("lawyer", "legal"),
+    ("law firm", "legal"),
+    ("solicitor", "legal"),
+    ("web design", "web design"),
+    ("web developer", "web development"),
+    ("web development", "web development"),
+    ("seo", "SEO"),
+    ("ecommerce", "e-commerce"),
+    ("shopify", "e-commerce"),
+    ("coach", "coaching"),
+    ("coaching", "coaching"),
+    ("marketing", "digital marketing"),
+    ("agency", "agency"),
+    ("studio", "studio"),
+)
+
+
+def _keyword_to_niche(keyword: str) -> str:
+    """
+    Return a short, human-readable niche label derived from *keyword*.
+
+    Uses a lookup table of common service / industry terms.  Falls back to
+    the first long word of the keyword when no match is found.
+    """
+    kw_lower = keyword.lower()
+    for fragment, label in _NICHE_MAP:
+        if fragment in kw_lower:
+            return label
+    # Fall back: first word longer than 3 chars that isn't a stop word.
+    _STOP = {"need", "hire", "help", "find", "want", "looking", "asap", "urgently",
+              "immediately", "required", "requirement"}
+    for word in kw_lower.split():
+        if len(word) > 3 and word not in _STOP:
+            return word
+    return keyword
 
 logging.basicConfig(
     level=logging.INFO,
@@ -189,7 +275,7 @@ def _is_safe_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def analyze_website(url: str, html: str) -> list[str]:
+def analyze_website(url: str, html: str, response_time: float | None = None) -> list[str]:
     """
     Inspect *url* and its *html* content for common issues.
 
@@ -199,6 +285,9 @@ def analyze_website(url: str, html: str) -> list[str]:
         The URL that was fetched (used to check the scheme).
     html:
         Raw HTML source of the page.
+    response_time:
+        Optional page load time in seconds.  When provided and above
+        ``SLOW_PAGE_THRESHOLD``, a "Slow page load" issue is added.
 
     Returns
     -------
@@ -212,6 +301,9 @@ def analyze_website(url: str, html: str) -> list[str]:
     * Missing ``<title>`` tag
     * Missing ``<meta name="description">`` tag
     * No contact page link found anywhere on the page
+    * No mobile viewport ``<meta name="viewport">`` tag
+    * No clear call-to-action (CTA) text on the page
+    * Slow page load (when ``response_time`` is provided)
     """
     issues: list[str] = []
 
@@ -243,6 +335,23 @@ def analyze_website(url: str, html: str) -> list[str]:
         )
     if not contact_link:
         issues.append("No contact page link found")
+
+    # --- Mobile viewport check ---
+    viewport_meta = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
+    if not viewport_meta:
+        issues.append("Not mobile-optimized (no viewport meta)")
+
+    # --- Call-to-action check ---
+    cta_found = bool(
+        soup.find(["button", "a"], string=_CTA_PATTERN)
+        or soup.find(["button", "a"], attrs={"class": _CTA_PATTERN})
+    )
+    if not cta_found:
+        issues.append("No clear call-to-action (CTA)")
+
+    # --- Page speed check ---
+    if response_time is not None and response_time > SLOW_PAGE_THRESHOLD:
+        issues.append(f"Slow page load ({response_time:.1f}s)")
 
     return issues
 
@@ -377,7 +486,9 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
         return result
 
     try:
+        _start = time.time()
         response = session.get(url, timeout=15, allow_redirects=True)
+        response_time = time.time() - _start
         response.raise_for_status()
     except requests.TooManyRedirects:
         logger.warning("Too many redirects for %s – skipping.", url)
@@ -413,7 +524,7 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
     result["contact_page"] = contact_url
 
     # --- Website analysis ---
-    result["issues"] = analyze_website(url, html)
+    result["issues"] = analyze_website(url, html, response_time=response_time)
 
     # --- Visit contact page to find additional emails ---
     if contact_url and contact_url != url:
@@ -574,13 +685,19 @@ def scrape(keyword: str, num_results: int = 10) -> list[dict]:
     for url in urls:
         logger.info("Visiting: %s", url)
         data = extract_site_data(url, session)
-        lead_score = score_lead(data) + _urgency_bonus(keyword, data.get("title", ""))
+        lead_score = (
+            score_lead(data)
+            + _website_opportunity_score(data)
+            + _urgency_bonus(keyword, data.get("title", ""))
+        )
         time.sleep(REQUEST_DELAY)
 
         issues_str = "; ".join(data["issues"]) if data["issues"] else ""
+        niche = _keyword_to_niche(keyword)
         base = {
             "source": "Bing",
             "keyword": keyword,
+            "niche": niche,
             "url": url,
             "title": data["title"],
             "phone": data["phone"],
@@ -644,7 +761,7 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "source", "keyword", "url", "title", "email", "phone",
+        "source", "keyword", "niche", "url", "title", "email", "phone",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
     ]

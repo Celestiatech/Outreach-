@@ -83,6 +83,11 @@ SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1
 SCORE_PER_ISSUE = -1
 SCORE_URGENCY_BONUS = 2   # keyword or listing name contains buyer-intent / urgency signal
+SCORE_OPPORTUNITY_BONUS = 2   # flat bonus when ANY website issues are found
+SCORE_OPPORTUNITY_PER_ISSUE = 1  # each additional issue = one more pain point to pitch
+
+# Slow page-load threshold (seconds).
+SLOW_PAGE_THRESHOLD = 3.0
 
 # Words that indicate a buyer or urgent intent in the keyword / listing name.
 URGENCY_KEYWORDS: tuple[str, ...] = (
@@ -94,6 +99,14 @@ URGENCY_KEYWORDS: tuple[str, ...] = (
     "website needed", "redesign needed", "freelancer needed",
 )
 
+# Call-to-action patterns we expect to find on a well-optimised site.
+_CTA_PATTERN = re.compile(
+    r"\b(book|get started|buy now|order now|sign up|contact us|call us|"
+    r"free trial|get a quote|request a quote|schedule|get in touch|"
+    r"start now|try free|claim|reserve)\b",
+    re.I,
+)
+
 
 def _urgency_bonus(keyword: str, name: str = "") -> int:
     """Return ``SCORE_URGENCY_BONUS`` if *keyword* or *name* contain an urgency signal."""
@@ -101,6 +114,36 @@ def _urgency_bonus(keyword: str, name: str = "") -> int:
     if any(kw in combined for kw in URGENCY_KEYWORDS):
         return SCORE_URGENCY_BONUS
     return 0
+
+
+def _website_opportunity_score(data: dict) -> int:
+    """
+    Return an *opportunity* bonus based on website issues found.
+
+    Issues represent pain points that can be pitched in outreach.  This is
+    intentionally separate from :func:`score_lead` so that contact-quality
+    is not conflated with outreach-opportunity.
+
+    * ``+2`` flat bonus when ANY issues are present
+    * ``+1`` for each individual issue (stacks)
+    """
+    issues = data.get("issues", [])
+    if not issues:
+        return 0
+    return SCORE_OPPORTUNITY_BONUS + len(issues) * SCORE_OPPORTUNITY_PER_ISSUE
+
+
+def _extract_city(address: str) -> str:
+    """
+    Return the most likely city name from a comma-separated *address* string.
+
+    Takes the second segment (index 1) when the address has multiple parts,
+    which covers the common ``"Street, City, Postcode"`` pattern.
+    """
+    if not address:
+        return ""
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    return parts[1] if len(parts) > 1 else ""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -179,9 +222,19 @@ def _is_safe_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def analyze_website(url: str, html: str) -> list[str]:
+def analyze_website(url: str, html: str, response_time: float | None = None) -> list[str]:
     """
     Inspect *url* and its *html* content for common issues.
+
+    Parameters
+    ----------
+    url:
+        The URL that was fetched (used to check the scheme).
+    html:
+        Raw HTML source of the page.
+    response_time:
+        Optional page load time in seconds.  When provided and above
+        ``SLOW_PAGE_THRESHOLD``, a "Slow page load" issue is added.
 
     Issues checked
     ~~~~~~~~~~~~~~
@@ -189,6 +242,9 @@ def analyze_website(url: str, html: str) -> list[str]:
     * Missing ``<title>`` tag
     * Missing ``<meta name="description">`` tag
     * No contact page link found anywhere on the page
+    * No mobile viewport ``<meta name="viewport">`` tag
+    * No clear call-to-action (CTA) text on the page
+    * Slow page load (when ``response_time`` is provided)
     """
     issues: list[str] = []
 
@@ -209,6 +265,23 @@ def analyze_website(url: str, html: str) -> list[str]:
         contact_link = soup.find("a", href=re.compile(r"contact", re.I))
     if not contact_link:
         issues.append("No contact page link found")
+
+    # --- Mobile viewport check ---
+    viewport_meta = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
+    if not viewport_meta:
+        issues.append("Not mobile-optimized (no viewport meta)")
+
+    # --- Call-to-action check ---
+    cta_found = bool(
+        soup.find(["button", "a"], string=_CTA_PATTERN)
+        or soup.find(["button", "a"], attrs={"class": _CTA_PATTERN})
+    )
+    if not cta_found:
+        issues.append("No clear call-to-action (CTA)")
+
+    # --- Page speed check ---
+    if response_time is not None and response_time > SLOW_PAGE_THRESHOLD:
+        issues.append(f"Slow page load ({response_time:.1f}s)")
 
     return issues
 
@@ -297,7 +370,9 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
         return result
 
     try:
+        _start = time.time()
         response = session.get(url, timeout=15, allow_redirects=True)
+        response_time = time.time() - _start
         response.raise_for_status()
     except requests.TooManyRedirects:
         logger.warning("Too many redirects for %s – skipping.", url)
@@ -317,7 +392,7 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
 
     contact_url = _find_contact_page_url(url, soup)
     result["contact_page"] = contact_url
-    result["issues"] = analyze_website(url, html)
+    result["issues"] = analyze_website(url, html, response_time=response_time)
 
     if contact_url and contact_url != url:
         logger.info("Visiting contact page: %s", contact_url)
@@ -697,11 +772,17 @@ def scrape_google_maps(
                 "instagram": enrichment["instagram"],
                 "issues": enrichment["issues"],
             }
-            lead_score = score_lead(lead_data) + _urgency_bonus(keyword, name)
+            lead_score = (
+                score_lead(lead_data)
+                + _website_opportunity_score(lead_data)
+                + _urgency_bonus(keyword, name)
+            )
 
             base = {
                 "source": "Google Maps",
                 "keyword": keyword,
+                "niche": category or "",
+                "city": _extract_city(address),
                 "name": name,
                 "address": address,
                 "phone": final_phone,
@@ -864,7 +945,7 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "source", "keyword", "name", "address", "phone", "website",
+        "source", "keyword", "niche", "city", "name", "address", "phone", "website",
         "rating", "reviews", "category", "email",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
