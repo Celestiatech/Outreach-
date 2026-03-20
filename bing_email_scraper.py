@@ -1,8 +1,8 @@
 """
-Bing Outreach Lead Generator
------------------------------
-Searches Bing for a keyword, visits each result page, extracts contact
-information, analyzes the site for common issues, scores each lead, and
+Google Outreach Lead Generator (Selenium-powered)
+--------------------------------------------------
+Searches Google for a keyword using Selenium (JavaScript rendering), visits each result page, 
+extracts contact information, analyzes the site for common issues, scores each lead, and
 saves everything to an enriched CSV file ready for outreach campaigns.
 
 Extracted fields
@@ -12,9 +12,10 @@ contact_page, issues, lead_score
 
 Usage:
     python bing_email_scraper.py --keyword "digital agency UK" --results 20 --output leads.csv
-"""
 
-from __future__ import annotations
+Requirements:
+    pip install selenium webdriver-manager
+"""
 
 import argparse
 import csv
@@ -22,39 +23,53 @@ import logging
 import os
 import re
 import time
-from urllib.parse import unquote, urljoin, urlparse
+import json
+from urllib.parse import unquote, urljoin, urlparse, quote
 
 import requests
 from bs4 import BeautifulSoup
+
+# Import Selenium for JavaScript rendering
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.common.by import By
+    from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.webdriver.chrome.service import Service
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
+# Use DuckDuckGo (more scraper-friendly than Google or Bing)
+DUCKDUCKGO_SEARCH_URL = "https://html.duckduckgo.com/"
 BING_SEARCH_URL = "https://www.bing.com/search"
 
-# Number of results returned per Bing search page.
+# Number of results returned per search page.
 RESULTS_PER_PAGE = 10
+
+# Default configuration file
+CONFIG_FILE = "search_patterns.json"
 
 # Rotate a realistic User-Agent to reduce the chance of being blocked.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
+        "Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,*/*;q=0.8"
-    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.bing.com/",
+    "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "max-age=0",
 }
 
 # Regex that matches common email formats while rejecting obvious
@@ -88,154 +103,9 @@ MAX_REDIRECTS = 5
 # Lead scoring weights
 SCORE_HAS_EMAIL = 3
 SCORE_HAS_PHONE = 2
-SCORE_HAS_WHATSAPP = 3    # WhatsApp = direct, fast channel → highest priority contact
 SCORE_HAS_LINKEDIN = 1
 SCORE_HAS_SOCIAL = 1      # Twitter / Facebook / Instagram combined
-SCORE_PER_ISSUE = -1      # deducted for every detected issue (contact-quality signal)
-SCORE_URGENCY_BONUS = 2   # keyword or page title contains buyer-intent / urgency signal
-SCORE_OPPORTUNITY_BONUS = 2   # flat bonus when ANY website issues are found
-SCORE_OPPORTUNITY_PER_ISSUE = 1  # each additional issue = one more pain point to pitch
-
-# Slow page-load threshold (seconds) above which a warning issue is added.
-SLOW_PAGE_THRESHOLD = 3.0
-
-# Words that indicate a buyer or urgent intent in the keyword / page title.
-URGENCY_KEYWORDS: tuple[str, ...] = (
-    "urgent", "urgently", "asap", "immediately", "right away",
-    "looking for", "need help", "hire ", "hiring", "needed",
-    "required", "requirement", "project available",
-    "developer needed", "designer needed", "web developer",
-    "need website", "need seo", "need developer",
-    "website needed", "redesign needed", "freelancer needed",
-)
-
-# Call-to-action patterns we expect to find on a well-optimised site.
-_CTA_PATTERN = re.compile(
-    r"\b(book|get started|buy now|order now|sign up|contact us|call us|"
-    r"free trial|get a quote|request a quote|schedule|get in touch|"
-    r"start now|try free|claim|reserve)\b",
-    re.I,
-)
-
-
-def _urgency_bonus(keyword: str, title: str = "") -> int:
-    """Return ``SCORE_URGENCY_BONUS`` if *keyword* or *title* contain an urgency signal."""
-    combined = f"{keyword} {title}".lower()
-    if any(kw in combined for kw in URGENCY_KEYWORDS):
-        return SCORE_URGENCY_BONUS
-    return 0
-
-
-def _website_opportunity_score(data: dict) -> int:
-    """
-    Return an *opportunity* bonus based on website issues found.
-
-    Every issue detected by :func:`analyze_website` represents a pain point
-    that can be pitched in outreach.  The more issues, the stronger the
-    opportunity:
-
-    * ``+2`` flat bonus when ANY issues are present
-    * ``+1`` for each individual issue (stacks)
-
-    This is intentionally separate from :func:`score_lead` so that the
-    contact-quality score is not conflated with the outreach-opportunity score.
-    """
-    issues = data.get("issues", [])
-    if not issues:
-        return 0
-    return SCORE_OPPORTUNITY_BONUS + len(issues) * SCORE_OPPORTUNITY_PER_ISSUE
-
-
-# Niche keyword map: substring → clean label used in email personalisation.
-_NICHE_MAP: tuple[tuple[str, str], ...] = (
-    ("dentist", "dental"),
-    ("dental", "dental"),
-    ("gym", "fitness"),
-    ("fitness", "fitness"),
-    ("personal trainer", "fitness"),
-    ("real estate", "real estate"),
-    ("estate agent", "real estate"),
-    ("property", "real estate"),
-    ("restaurant", "restaurant"),
-    ("cafe", "restaurant"),
-    ("plumber", "plumbing"),
-    ("plumbing", "plumbing"),
-    ("accountant", "accounting"),
-    ("accounting", "accounting"),
-    ("lawyer", "legal"),
-    ("law firm", "legal"),
-    ("solicitor", "legal"),
-    ("web design", "web design"),
-    ("web developer", "web development"),
-    ("web development", "web development"),
-    ("seo", "SEO"),
-    ("ecommerce", "e-commerce"),
-    ("shopify", "e-commerce"),
-    ("coach", "coaching"),
-    ("coaching", "coaching"),
-    ("marketing", "digital marketing"),
-    ("agency", "agency"),
-    ("studio", "studio"),
-)
-
-# Stop words excluded when deriving a fallback niche label from a keyword.
-_NICHE_STOP_WORDS: frozenset[str] = frozenset({
-    "need", "hire", "help", "find", "want", "looking", "asap", "urgently",
-    "immediately", "required", "requirement",
-})
-
-
-def _keyword_to_niche(keyword: str) -> str:
-    """
-    Return a short, human-readable niche label derived from *keyword*.
-
-    Uses a lookup table of common service / industry terms.  Falls back to
-    the first long word of the keyword when no match is found.
-    """
-    kw_lower = keyword.lower()
-    for fragment, label in _NICHE_MAP:
-        if fragment in kw_lower:
-            return label
-    # Fall back: first word longer than 3 chars that isn't a stop word.
-    for word in kw_lower.split():
-        if len(word) > 3 and word not in _NICHE_STOP_WORDS:
-            return word
-    return keyword
-
-# WhatsApp number regex – matches wa.me links, api.whatsapp.com links, and
-# general phone numbers in international format.
-_WA_LINK_RE = re.compile(r'wa\.me/(\d+)', re.I)
-_WA_API_RE = re.compile(r'api\.whatsapp\.com/send\?phone=(\d+)', re.I)
-_PHONE_DIGITS_RE = re.compile(r'\+?\d[\d\s\-]{8,15}')
-
-
-def extract_whatsapp(html: str) -> str:
-    """
-    Return the first WhatsApp-reachable number found in *html*, or ``""``.
-
-    Detection order (most → least reliable):
-    1. ``wa.me/<number>`` links
-    2. ``api.whatsapp.com/send?phone=<number>`` links
-    3. General phone-number pattern (10–15 digits after stripping non-digits)
-
-    The returned value is always digits-only (no spaces, dashes, or ``+``).
-    """
-    numbers: list[str] = []
-
-    # 1 – wa.me links
-    numbers.extend(_WA_LINK_RE.findall(html))
-
-    # 2 – api.whatsapp.com links
-    numbers.extend(_WA_API_RE.findall(html))
-
-    # 3 – general phone numbers
-    for raw in _PHONE_DIGITS_RE.findall(html):
-        clean = re.sub(r"\D", "", raw)
-        if 10 <= len(clean) <= 15:
-            numbers.append(clean)
-
-    return numbers[0] if numbers else ""
-
+SCORE_PER_ISSUE = -1      # deducted for every detected issue
 
 logging.basicConfig(
     level=logging.INFO,
@@ -315,7 +185,7 @@ def _is_safe_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def analyze_website(url: str, html: str, response_time: float | None = None) -> list[str]:
+def analyze_website(url: str, html: str) -> list[str]:
     """
     Inspect *url* and its *html* content for common issues.
 
@@ -325,9 +195,6 @@ def analyze_website(url: str, html: str, response_time: float | None = None) -> 
         The URL that was fetched (used to check the scheme).
     html:
         Raw HTML source of the page.
-    response_time:
-        Optional page load time in seconds.  When provided and above
-        ``SLOW_PAGE_THRESHOLD``, a "Slow page load" issue is added.
 
     Returns
     -------
@@ -341,9 +208,6 @@ def analyze_website(url: str, html: str, response_time: float | None = None) -> 
     * Missing ``<title>`` tag
     * Missing ``<meta name="description">`` tag
     * No contact page link found anywhere on the page
-    * No mobile viewport ``<meta name="viewport">`` tag
-    * No clear call-to-action (CTA) text on the page
-    * Slow page load (when ``response_time`` is provided)
     """
     issues: list[str] = []
 
@@ -375,23 +239,6 @@ def analyze_website(url: str, html: str, response_time: float | None = None) -> 
         )
     if not contact_link:
         issues.append("No contact page link found")
-
-    # --- Mobile viewport check ---
-    viewport_meta = soup.find("meta", attrs={"name": re.compile(r"^viewport$", re.I)})
-    if not viewport_meta:
-        issues.append("Not mobile-optimized (no viewport meta)")
-
-    # --- Call-to-action check ---
-    cta_found = bool(
-        soup.find(["button", "a"], string=_CTA_PATTERN)
-        or soup.find(["button", "a"], attrs={"class": _CTA_PATTERN})
-    )
-    if not cta_found:
-        issues.append("No clear call-to-action (CTA)")
-
-    # --- Page speed check ---
-    if response_time is not None and response_time > SLOW_PAGE_THRESHOLD:
-        issues.append(f"Slow page load ({response_time:.1f}s)")
 
     return issues
 
@@ -513,7 +360,6 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
         "emails": set(),
         "title": "",
         "phone": "",
-        "whatsapp_number": "",
         "linkedin": "",
         "twitter": "",
         "facebook": "",
@@ -527,9 +373,7 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
         return result
 
     try:
-        _start = time.time()
         response = session.get(url, timeout=15, allow_redirects=True)
-        response_time = time.time() - _start
         response.raise_for_status()
     except requests.TooManyRedirects:
         logger.warning("Too many redirects for %s – skipping.", url)
@@ -557,9 +401,6 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
     # --- Phone ---
     result["phone"] = _extract_phone(soup)
 
-    # --- WhatsApp ---
-    result["whatsapp_number"] = extract_whatsapp(html)
-
     # --- Social media links ---
     result.update(_extract_social_links(soup))
 
@@ -568,9 +409,9 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
     result["contact_page"] = contact_url
 
     # --- Website analysis ---
-    result["issues"] = analyze_website(url, html, response_time=response_time)
+    result["issues"] = analyze_website(url, html)
 
-    # --- Visit contact page to find additional emails / WhatsApp ---
+    # --- Visit contact page to find additional emails ---
     if contact_url and contact_url != url:
         logger.info("Visiting contact page: %s", contact_url)
         try:
@@ -583,9 +424,6 @@ def extract_site_data(url: str, session: requests.Session) -> dict:
             # Prefer phone from contact page if homepage had none.
             if not result["phone"]:
                 result["phone"] = _extract_phone(contact_soup)
-            # Prefer WhatsApp from contact page if homepage had none.
-            if not result["whatsapp_number"]:
-                result["whatsapp_number"] = extract_whatsapp(contact_resp.text)
         except requests.RequestException as exc:
             logger.warning("Could not fetch contact page %s – %s", contact_url, exc)
 
@@ -605,7 +443,6 @@ def score_lead(data: dict) -> int:
 
     * ``+3`` if at least one email address was found
     * ``+2`` if a phone number was found
-    * ``+3`` if a WhatsApp number was found (direct, high-conversion channel)
     * ``+1`` if a LinkedIn profile was found
     * ``+1`` if any other social media link was found
     * ``-1`` for each issue detected by :func:`analyze_website`
@@ -625,8 +462,6 @@ def score_lead(data: dict) -> int:
         score += SCORE_HAS_EMAIL
     if data.get("phone"):
         score += SCORE_HAS_PHONE
-    if data.get("whatsapp_number"):
-        score += SCORE_HAS_WHATSAPP
     if data.get("linkedin"):
         score += SCORE_HAS_LINKEDIN
     if any(data.get(p) for p in ("twitter", "facebook", "instagram")):
@@ -642,7 +477,9 @@ def score_lead(data: dict) -> int:
 
 def bing_search(keyword: str, num_results: int = 10) -> list[str]:
     """
-    Query Bing and return a list of result URLs.
+    Query Google using Selenium and return a list of result URLs.
+
+    Uses a headless Chrome browser to render JavaScript and extract search results.
 
     Parameters
     ----------
@@ -656,47 +493,138 @@ def bing_search(keyword: str, num_results: int = 10) -> list[str]:
     list[str]
         Deduplicated list of result page URLs.
     """
+    if not SELENIUM_AVAILABLE:
+        logger.error("Selenium not available. Install with: pip install selenium webdriver-manager")
+        return []
+    
     urls: list[str] = []
-    page = 0
-
-    session = _create_session()
-
-    while len(urls) < num_results:
-        params = {
-            "q": keyword,
-            "first": page * RESULTS_PER_PAGE + 1,  # Bing pagination offset
-            "count": RESULTS_PER_PAGE,
-        }
-
-        try:
-            response = session.get(
-                BING_SEARCH_URL, params=params, timeout=15
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.error("Bing search request failed: %s", exc)
-            break
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # Bing wraps each organic result in <li class="b_algo">
-        results = soup.select("li.b_algo h2 a")
+    driver = None
+    
+    try:
+        # Configure Chrome with stealth settings
+        options = ChromeOptions()
+        options.add_argument("--headless")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--no-sandbox")
+        
+        # Create driver with WebDriver Manager
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        
+        # Add stealth JavaScript
+        stealth_script = """
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => false,
+        });
+        """
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {"source": stealth_script})
+        
+        logger.info("Searching Google for: %s", keyword)
+        
+        # Search on Google with proper URL encoding
+        from urllib.parse import quote
+        google_url = f"https://www.google.com/search?q={quote(keyword)}&num=10"
+        driver.get(google_url)
+        
+        # Wait and scroll to trigger lazy-loaded results
+        time.sleep(3)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        
+        # Parse the rendered HTML
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        
+        # Check for captcha/block page
+        if "detected unusual traffic" in driver.page_source.lower() or "please confirm" in driver.page_source.lower():
+            logger.warning("Google detected automated access - blocking us")
+            return []
+        
+        # Google results are in multiple formats; try all
+        # Format 1: div.g (older format)
+        results = soup.select("div.g a")
+        # Format 2: div.yuRUbf (newer format)
         if not results:
-            logger.info("No more Bing results found.")
-            break
-
+            results = soup.select("div.yuRUbf a")
+        # Format 3: h3 > a elements
+        if not results:
+            results = soup.select("h3 > a")
+        
+        logger.debug("Found %d potential result links", len(results))
+        
+        # Extract URLs from results
         for tag in results:
             href = tag.get("href", "")
-            if _is_safe_url(href) and href not in urls:
+            # Skip Google's own URLs and special pages
+            if (href and
+                href.startswith("http") and 
+                "google.com" not in href and
+                "/url?q=" not in href and
+                "webcache" not in href and
+                _is_safe_url(href) and 
+                href not in urls):
                 urls.append(href)
+                logger.debug("Found result: %s", href[:50])
                 if len(urls) >= num_results:
                     break
-
-        page += 1
-        time.sleep(REQUEST_DELAY)
-
-    logger.info("Collected %d result URL(s) from Bing.", len(urls))
+        
+        logger.info("Collected %d result URL(s) from Google.", len(urls))
+        
+    except Exception as exc:
+        logger.error("Error during Google search: %s", exc)
+    
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+    
     return urls[:num_results]
+
+
+# ---------------------------------------------------------------------------
+# Configuration loading
+# ---------------------------------------------------------------------------
+
+def load_search_config(config_path: str = CONFIG_FILE) -> dict:
+    """
+    Load search patterns from JSON config file.
+    
+    Parameters
+    ----------
+    config_path:
+        Path to search_patterns.json file
+    
+    Returns
+    -------
+    dict
+        Configuration with search_patterns and settings
+    """
+    if not os.path.exists(config_path):
+        logger.warning("Config file '%s' not found. Using default patterns.", config_path)
+        return {
+            "search_patterns": [
+                {"name": "Default", "keyword": "web design", "results": 5}
+            ],
+            "settings": {
+                "delay_between_searches": 2,
+                "delay_between_sites": 1.5,
+            }
+        }
+    
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        logger.info("Loaded %d search patterns from %s", len(config.get("search_patterns", [])), config_path)
+        return config
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid JSON in config file: %s", exc)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -735,25 +663,15 @@ def scrape(keyword: str, num_results: int = 10) -> list[dict]:
     for url in urls:
         logger.info("Visiting: %s", url)
         data = extract_site_data(url, session)
-        lead_score = (
-            score_lead(data)
-            + _website_opportunity_score(data)
-            + _urgency_bonus(keyword, data.get("title", ""))
-        )
+        lead_score = score_lead(data)
         time.sleep(REQUEST_DELAY)
 
         issues_str = "; ".join(data["issues"]) if data["issues"] else ""
-        niche = _keyword_to_niche(keyword)
-        whatsapp = data.get("whatsapp_number", "")
         base = {
-            "source": "Bing",
             "keyword": keyword,
-            "niche": niche,
             "url": url,
             "title": data["title"],
             "phone": data["phone"],
-            "whatsapp_number": whatsapp,
-            "has_whatsapp": "true" if whatsapp else "false",
             "linkedin": data["linkedin"],
             "twitter": data["twitter"],
             "facebook": data["facebook"],
@@ -814,8 +732,7 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
     fieldnames = [
-        "source", "keyword", "niche", "url", "title", "email", "phone",
-        "whatsapp_number", "has_whatsapp",
+        "keyword", "url", "title", "email", "phone",
         "linkedin", "twitter", "facebook", "instagram",
         "contact_page", "issues", "lead_score",
     ]
@@ -836,28 +753,38 @@ def save_to_csv(records: list[dict], output_path: str) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Bing Outreach Lead Generator – search Bing for a keyword, "
+            "Google Outreach Lead Generator – search Google for a keyword, "
             "visit result pages, extract contact info and social links, "
             "analyze each site, score each lead, and save to CSV."
         )
     )
     parser.add_argument(
         "--keyword",
-        required=True,
-        help="Search keyword or phrase (e.g. 'digital agency London').",
+        help="Search keyword or phrase (e.g. 'digital agency London'). If not provided, uses search_patterns.json",
     )
     parser.add_argument(
         "--results",
         type=int,
         default=10,
         metavar="N",
-        help="Number of Bing result pages to inspect (default: 10).",
+        help="Number of result pages to inspect (default: 10).",
     )
     parser.add_argument(
         "--output",
         default="leads.csv",
         metavar="FILE",
         help="Path to the output CSV file (default: leads.csv).",
+    )
+    parser.add_argument(
+        "--config",
+        default="search_patterns.json",
+        metavar="FILE",
+        help="Path to search patterns config file (default: search_patterns.json).",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append to existing output file instead of overwriting.",
     )
     return parser
 
@@ -866,8 +793,48 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    records = scrape(keyword=args.keyword, num_results=args.results)
-    save_to_csv(records, args.output)
+    all_records: list[dict] = []
+
+    # If keyword is provided, use it directly
+    if args.keyword:
+        logger.info("Running single search: %s", args.keyword)
+        records = scrape(keyword=args.keyword, num_results=args.results)
+        all_records.extend(records)
+    else:
+        # Use config file for multiple search patterns
+        config = load_search_config(args.config)
+        patterns = config.get("search_patterns", [])
+        settings = config.get("settings", {})
+        
+        if not patterns:
+            logger.error("No search patterns found in config file")
+            return
+        
+        delay_between_searches = settings.get("delay_between_searches", 2)
+        
+        logger.info("Running %d search pattern(s) from config", len(patterns))
+        
+        for i, pattern in enumerate(patterns):
+            keyword = pattern.get("keyword")
+            num_results = pattern.get("results", args.results)
+            name = pattern.get("name", keyword)
+            
+            if not keyword:
+                logger.warning("Skipping pattern without keyword: %s", pattern)
+                continue
+            
+            logger.info("[%d/%d] Searching: %s (%s)", i + 1, len(patterns), name, keyword)
+            records = scrape(keyword=keyword, num_results=num_results)
+            all_records.extend(records)
+            
+            if i < len(patterns) - 1:
+                time.sleep(delay_between_searches)
+    
+    # Save all results
+    if all_records:
+        save_to_csv(all_records, args.output)
+    else:
+        logger.warning("No records to save")
 
 
 if __name__ == "__main__":
