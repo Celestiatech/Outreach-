@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -41,7 +41,8 @@ st.set_page_config(
 # Helpers
 # ---------------------------------------------------------------------------
 
-LEADS_CSV = "leads.csv"
+LEADS_CSV = "leads.csv"           # staging / most-recent scrape
+LIVE_LEADS_CSV = "live_leads.csv" # permanent cumulative store
 SENT_LOG_CSV = "sent_log.csv"
 UNSUBSCRIBE_TXT = "unsubscribe.txt"
 EMAIL_TEMPLATE_TXT = "email_template.txt"
@@ -67,6 +68,31 @@ def _read_csv(path: str) -> pd.DataFrame:
 
 def _write_csv(path: str, df: pd.DataFrame) -> None:
     df.to_csv(path, index=False)
+
+
+def _push_to_live_leads(records: List[Dict]) -> Tuple[int, int]:
+    """
+    Append *records* to ``LIVE_LEADS_CSV``, deduplicating on all columns.
+
+    Returns ``(new_count, duplicate_count)``.
+    """
+    new_df = pd.DataFrame(records)
+    existing = _read_csv(LIVE_LEADS_CSV)
+
+    if existing.empty:
+        _write_csv(LIVE_LEADS_CSV, new_df)
+        return len(new_df), 0
+
+    combined = pd.concat([existing, new_df], ignore_index=True)
+    before = len(combined)
+    combined = combined.drop_duplicates()
+    after = len(combined)
+
+    _write_csv(LIVE_LEADS_CSV, combined)
+
+    new_count = max(after - len(existing), 0)
+    dup_count = max(len(new_df) - new_count, 0)
+    return new_count, dup_count
 
 
 def _default_template() -> str:
@@ -234,21 +260,24 @@ def _render_sidebar() -> None:
         st.divider()
 
         # Quick stats from disk
-        leads_df = _read_csv(LEADS_CSV)
+        live_df = _read_csv(LIVE_LEADS_CSV)
+        staging_df = _read_csv(LEADS_CSV)
         sent_df = _read_csv(SENT_LOG_CSV)
 
-        total_leads = len(leads_df)
-        unique_emails = (
-            leads_df["email"].str.strip().replace("", pd.NA).dropna().nunique()
-            if "email" in leads_df.columns else 0
+        live_total = len(live_df)
+        live_emails = (
+            live_df["email"].str.strip().replace("", pd.NA).dropna().nunique()
+            if "email" in live_df.columns else 0
         )
+        staged = len(staging_df)
         sent_n = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
 
         st.caption("📊 QUICK STATS")
         s1, s2 = st.columns(2)
-        s1.metric("Leads", f"{total_leads:,}")
+        s1.metric("Live Leads", f"{live_total:,}")
         s2.metric("Sent", f"{sent_n:,}")
-        s1.metric("Emails", f"{unique_emails:,}")
+        s1.metric("Emails", f"{live_emails:,}")
+        s2.metric("Staged", f"{staged:,}")
 
         st.divider()
         st.caption("🗂 TABS")
@@ -270,8 +299,9 @@ def _render_sidebar() -> None:
         st.divider()
         st.caption("⚡ TIPS")
         st.info(
-            "Run **Scrape** first to collect leads, then go to **Compose & Send** "
-            "to send outreach emails.",
+            "1️⃣ **Scrape** leads → review the preview\n\n"
+            "2️⃣ Click **Push to Live Leads** to save them permanently\n\n"
+            "3️⃣ Go to **Compose & Send** to send outreach emails",
             icon="💡",
         )
 
@@ -302,7 +332,8 @@ def tab_dashboard() -> None:
         unsafe_allow_html=True,
     )
 
-    leads_df = _read_csv(LEADS_CSV)
+    leads_df = _read_csv(LIVE_LEADS_CSV)
+    staging_df = _read_csv(LEADS_CSV)
     sent_df = _read_csv(SENT_LOG_CSV)
 
     # --- KPI row ---
@@ -310,16 +341,17 @@ def tab_dashboard() -> None:
 
     total_leads = len(leads_df)
     unique_emails = leads_df["email"].str.strip().replace("", pd.NA).dropna().nunique() if "email" in leads_df.columns else 0
+    staged = len(staging_df)
 
     sent_count = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
     failed_count = int((sent_df["status"] == "failed").sum()) if "status" in sent_df.columns else 0
     success_rate = f"{sent_count / (sent_count + failed_count) * 100:.0f}%" if (sent_count + failed_count) > 0 else "—"
 
-    k1.metric("Total leads", f"{total_leads:,}")
+    k1.metric("Live leads", f"{total_leads:,}")
     k2.metric("Unique emails", f"{unique_emails:,}")
     k3.metric("Emails sent", f"{sent_count:,}")
     k4.metric("Failed sends", f"{failed_count:,}")
-    k5.metric("Success rate", success_rate)
+    k5.metric("Staged (unreviewed)", f"{staged:,}")
 
     st.divider()
 
@@ -336,7 +368,7 @@ def tab_dashboard() -> None:
             else:
                 st.info("No lead score data available.", icon="ℹ️")
         else:
-            st.info("Run the **Scrape** tab first to populate leads.", icon="🔍")
+            st.info("Scrape leads and push them to **Live Leads** to see data here.", icon="🔍")
 
     # --- Sends over time ---
     with col_right:
@@ -450,30 +482,83 @@ def tab_unsubscribe() -> None:
 # ---------------------------------------------------------------------------
 
 def tab_scrape() -> None:
-    st.header("🔍 Scrape Leads")
-    st.caption("Search Google Maps or Bing and extract business contact information automatically.")
-    st.divider()
+    st.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg,#6366f1 0%,#8b5cf6 60%,#0ea5e9 100%);
+            border-radius:14px;padding:22px 28px;margin-bottom:20px;color:#fff;
+        ">
+            <div style="font-size:1.5rem;font-weight:800;letter-spacing:-.03em;">🔍 Scrape Leads</div>
+            <div style="font-size:.9rem;opacity:.85;margin-top:4px;">
+                Search Google Maps or Bing · review the results · push good leads to your permanent Live Leads database.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        keyword = st.text_input("Search keyword", placeholder="e.g. digital agency London")
-    with col2:
-        num_results = st.number_input("Number of results", min_value=1, max_value=200, value=10, step=5)
+    # ── Step 1: Keywords ─────────────────────────────────────────────────────
+    st.subheader("Step 1 · Keywords")
+    kw_col, opt_col = st.columns([3, 1])
+    with kw_col:
+        keywords_raw = st.text_area(
+            "Search keywords — one per line",
+            placeholder="digital agency London\nweb design Birmingham\nmarketing agency UK",
+            height=130,
+            help="Each keyword is searched separately. Results from all keywords are combined.",
+        )
+    with opt_col:
+        num_results = st.number_input(
+            "Results per keyword", min_value=1, max_value=200, value=10, step=5
+        )
+        engine = st.radio("Search engine", ["Google Maps", "Bing"], horizontal=False)
 
-    engine = st.radio("Search engine", ["Google Maps", "Bing"], horizontal=True)
-    output_path = st.text_input("Save results to", value=LEADS_CSV)
-    append = st.checkbox("Append to existing CSV (instead of overwrite)", value=True)
+    keywords = [k.strip() for k in keywords_raw.splitlines() if k.strip()]
+    if keywords:
+        badges = "  ·  ".join(f"`{k}`" for k in keywords)
+        st.caption(f"📌 **{len(keywords)} keyword(s) queued:** {badges}")
 
-    run_btn = st.button("▶ Run Scraper", type="primary", disabled=not keyword.strip())
+    # ── Step 2: Qualification filter ─────────────────────────────────────────
+    st.subheader("Step 2 · Qualification Filter")
+    qual_filter = st.selectbox(
+        "Keep which leads?",
+        [
+            "All leads",
+            "🎯 Outreach targets only (businesses with website issues)",
+            "✅ Healthy sites only (no detected issues)",
+        ],
+        help=(
+            "**Outreach targets**: businesses whose websites have problems "
+            "(no SSL, missing contact page, missing meta description) — "
+            "ideal cold-outreach candidates.\n\n"
+            "Tip: the detected issues are saved in the `issues` column and you can "
+            "reference them in your email template with `{issues}`."
+        ),
+    )
+    st.caption(
+        "💡 Use **`{issues}`** in your email template to mention the specific "
+        "problems you spotted — makes outreach much more personal."
+    )
 
-    log_box = st.empty()
-    result_box = st.empty()
+    # ── Step 3: Run ──────────────────────────────────────────────────────────
+    st.subheader("Step 3 · Run")
+    run_btn = st.button(
+        "▶ Run Scraper",
+        type="primary",
+        disabled=not keywords,
+        help="Scrape all keywords and collect leads into a preview table.",
+    )
 
-    if run_btn and keyword.strip():
+    log_placeholder = st.empty()
+
+    if run_btn and keywords:
+        # Clear any previously staged results so the UI is fresh
+        st.session_state.pop("staged_records", None)
+        st.session_state.pop("staged_engine", None)
+
         log_lines: List[str] = []
         log_q: queue.Queue = queue.Queue()
 
-        # Attach queue handler to the root logger so scraper output is captured
         q_handler = _QueueHandler(log_q)
         q_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         root_logger = logging.getLogger()
@@ -484,38 +569,38 @@ def tab_scrape() -> None:
 
         def _run() -> None:
             try:
-                if engine == "Bing":
-                    from bing_email_scraper import scrape, save_to_csv
-                    records.extend(scrape(keyword=keyword.strip(), num_results=int(num_results)))
-                    if records:
-                        if append and Path(output_path).exists():
-                            existing = _read_csv(output_path)
-                            combined = pd.concat(
-                                [existing, pd.DataFrame(records)], ignore_index=True
-                            ).drop_duplicates()
-                            _write_csv(output_path, combined)
-                        else:
-                            save_to_csv(records, output_path)
-                else:
-                    from google_maps_scraper import save_to_csv as maps_save
-                    try:
+                for kw in keywords:
+                    logger.info("=== Scraping keyword: %s ===", kw)
+                    if engine == "Bing":
+                        from bing_email_scraper import scrape
+                        records.extend(scrape(keyword=kw, num_results=int(num_results)))
+                    else:
                         from google_maps_scraper import scrape as maps_scrape
-                    except ImportError:
-                        from google_maps_scraper import scrape_google_maps as maps_scrape
-                    records.extend(maps_scrape(keyword=keyword.strip(), num_results=int(num_results)))
-                    if records:
-                        if append and Path(output_path).exists():
-                            existing = _read_csv(output_path)
-                            combined = pd.concat(
-                                [existing, pd.DataFrame(records)], ignore_index=True
-                            ).drop_duplicates()
-                            _write_csv(output_path, combined)
-                        else:
-                            maps_save(records, output_path)
+                        records.extend(maps_scrape(keyword=kw, num_results=int(num_results)))
+
+                # Apply qualification filter
+                if "Outreach targets" in qual_filter:
+                    filtered = [r for r in records if r.get("issues")]
+                elif "Healthy sites" in qual_filter:
+                    filtered = [r for r in records if not r.get("issues")]
+                else:
+                    filtered = records[:]
+
+                records.clear()
+                records.extend(filtered)
+
+                # Save to staging CSV
+                if records:
+                    staging_df = pd.DataFrame(records)
+                    _write_csv(LEADS_CSV, staging_df)
+                    logger.info("Saved %d row(s) to staging CSV: %s", len(records), LEADS_CSV)
+
             except ImportError as exc:
-                error_holder.append(f"Missing dependency: {exc}. Run `pip install -r requirements.txt`.")
+                error_holder.append(
+                    f"Missing dependency: {exc}. Run `pip install -r requirements.txt`."
+                )
             except OSError as exc:
-                error_holder.append(f"File error while saving results: {exc}")
+                error_holder.append(f"File error: {exc}")
             except Exception as exc:  # noqa: BLE001
                 error_holder.append(f"Scraper error ({type(exc).__name__}): {exc}")
 
@@ -527,35 +612,101 @@ def tab_scrape() -> None:
         while thread.is_alive():
             while not log_q.empty():
                 log_lines.append(log_q.get_nowait())
-            log_box.text_area("Live log", "\n".join(log_lines[-60:]), height=220, key=f"log_{tick}")
+            log_placeholder.text_area(
+                "Live log", "\n".join(log_lines[-60:]), height=200, key=f"log_{tick}"
+            )
             tick += 1
             progress.progress(min(tick % 100, 99), text="Scraping…")
             time.sleep(0.5)
 
-        # Drain remaining log messages
         while not log_q.empty():
             log_lines.append(log_q.get_nowait())
         root_logger.removeHandler(q_handler)
-
         progress.progress(100, text="Done")
-        log_box.text_area("Live log", "\n".join(log_lines[-60:]), height=220, key="log_final")
+        log_placeholder.text_area(
+            "Live log", "\n".join(log_lines[-60:]), height=200, key="log_final"
+        )
 
         if error_holder:
             st.error(f"Scraper error: {error_holder[0]}")
         elif records:
-            st.success(f"✅ Scraped {len(records)} row(s) → saved to `{output_path}`")
-            df = pd.DataFrame(records)
-            result_box.dataframe(df, use_container_width=True)
-
-            csv_bytes = df.to_csv(index=False).encode()
-            st.download_button(
-                "⬇ Download results CSV",
-                data=csv_bytes,
-                file_name=Path(output_path).name,
-                mime="text/csv",
+            st.session_state["staged_records"] = records
+            st.session_state["staged_engine"] = engine
+            st.success(
+                f"✅ Scraped **{len(records)} row(s)** across **{len(keywords)} keyword(s)**. "
+                "Review below, then push to Live Leads when ready."
             )
         else:
-            st.warning("No records returned. Try a different keyword or engine.")
+            st.warning(
+                "No records returned after applying the filter. "
+                "Try a different keyword, engine, or filter setting."
+            )
+
+    # ── Step 4: Review & Push ────────────────────────────────────────────────
+    staged: List[Dict] = st.session_state.get("staged_records", [])
+    if staged:
+        st.divider()
+        st.subheader("Step 4 · Review Staged Leads")
+
+        df_staged = pd.DataFrame(staged)
+
+        # Summary metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total rows", f"{len(df_staged):,}")
+
+        email_count = (
+            int(df_staged["email"].str.strip().replace("", pd.NA).dropna().count())
+            if "email" in df_staged.columns else 0
+        )
+        m2.metric("With email", f"{email_count:,}")
+
+        if "issues" in df_staged.columns:
+            issues_series = df_staged["issues"].str.strip()
+            has_issues = int((issues_series != "").sum())
+        else:
+            has_issues = 0
+        m3.metric("With site issues", f"{has_issues:,}")
+
+        kw_count = df_staged["keyword"].nunique() if "keyword" in df_staged.columns else 0
+        m4.metric("Keywords", f"{kw_count:,}")
+
+        st.dataframe(df_staged, use_container_width=True)
+
+        dl_col, push_col, _ = st.columns([2, 2, 3])
+
+        with dl_col:
+            csv_bytes = df_staged.to_csv(index=False).encode()
+            st.download_button(
+                "⬇ Download staged CSV",
+                data=csv_bytes,
+                file_name="staged_leads.csv",
+                mime="text/csv",
+            )
+
+        with push_col:
+            push_btn = st.button(
+                "🚀 Push to Live Leads",
+                type="primary",
+                help=(
+                    f"Append these leads to `{LIVE_LEADS_CSV}` (the permanent store). "
+                    "Exact duplicates are skipped automatically."
+                ),
+            )
+
+        if push_btn:
+            new_count, dup_count = _push_to_live_leads(staged)
+            st.session_state.pop("staged_records", None)
+            st.session_state.pop("staged_engine", None)
+            if new_count:
+                st.success(
+                    f"🎉 **{new_count} new lead(s)** added to `{LIVE_LEADS_CSV}`. "
+                    f"{dup_count} duplicate(s) skipped."
+                )
+            else:
+                st.info(
+                    f"All {dup_count} row(s) were already in `{LIVE_LEADS_CSV}` — nothing new added."
+                )
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -564,21 +715,45 @@ def tab_scrape() -> None:
 
 def tab_leads() -> None:
     st.header("📋 Leads")
-    st.caption("Browse, filter, and download your collected leads.")
+    st.caption(
+        f"Browse, filter, and download your leads. "
+        f"The **Live Leads** tab (`{LIVE_LEADS_CSV}`) is your permanent database — "
+        f"`{LEADS_CSV}` holds the most recent staging scrape."
+    )
     st.divider()
 
-    uploaded = st.file_uploader("Upload a leads CSV", type="csv")
-    if uploaded:
-        df = pd.read_csv(uploaded, dtype=str).fillna("")
-        st.session_state["leads_df"] = df
-        st.success(f"Loaded {len(df)} rows from uploaded file.", icon="✅")
-    elif Path(LEADS_CSV).exists():
-        if st.button("📂 Load leads.csv from disk"):
-            st.session_state["leads_df"] = _read_csv(LEADS_CSV)
+    # Source selector
+    source = st.radio(
+        "Data source",
+        [f"📦 Live Leads ({LIVE_LEADS_CSV})", f"🔬 Staging ({LEADS_CSV})", "⬆ Upload CSV"],
+        horizontal=True,
+    )
 
-    df: pd.DataFrame = st.session_state.get("leads_df", pd.DataFrame())
+    if source.startswith("⬆"):
+        uploaded = st.file_uploader("Upload a leads CSV", type="csv")
+        if uploaded:
+            df = pd.read_csv(uploaded, dtype=str).fillna("")
+            st.session_state["leads_df"] = df
+            st.success(f"Loaded {len(df)} rows from uploaded file.", icon="✅")
+        df = st.session_state.get("leads_df", pd.DataFrame())
+    elif source.startswith("🔬"):
+        df = _read_csv(LEADS_CSV)
+        if not df.empty:
+            st.session_state["leads_df"] = df
+    else:
+        df = _read_csv(LIVE_LEADS_CSV)
+        if not df.empty:
+            st.session_state["leads_df"] = df
+
     if df.empty:
-        st.info("No leads loaded yet. Upload a CSV or run the **Scrape** tab first.", icon="📂")
+        if source.startswith("📦"):
+            st.info(
+                f"No live leads yet. Run **Scrape** and click **Push to Live Leads** "
+                f"to populate `{LIVE_LEADS_CSV}`.",
+                icon="📂",
+            )
+        else:
+            st.info("No data found for the selected source.", icon="📂")
         return
 
     st.write(f"**{len(df)} total rows**")
@@ -694,7 +869,7 @@ def tab_send() -> None:
         is_html = st.checkbox("HTML email", value=False)
 
     with st.expander("⚙️ Sending Options", expanded=False):
-        leads_csv = st.text_input("Leads CSV path", value=LEADS_CSV)
+        leads_csv = st.text_input("Leads CSV path", value=LIVE_LEADS_CSV)
         sent_log = st.text_input("Sent log CSV path", value=SENT_LOG_CSV)
         unsub_file = st.text_input("Unsubscribe list path", value=UNSUBSCRIBE_TXT)
         delay = st.slider("Delay between sends (seconds)", 0.5, 10.0, 2.0, 0.5)

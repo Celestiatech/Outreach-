@@ -3,8 +3,11 @@ Hi {name},
 I came across {url} and wanted to reach out.
 
 We help businesses like yours improve their online presence and generate more leads.
-I noticed a few things that could be quickly improved on your site – would you be open
-to a free 15-minute review call this week?
+I noticed a few things that could be quickly improved on your site:
+
+{issues}
+
+Would you be open to a free 15-minute review call this week?
 
 Looking forward to hearing from you.
 
