@@ -597,275 +597,502 @@ def _render_sidebar() -> None:
 # Tab: Dashboard
 # ---------------------------------------------------------------------------
 
+# Colour constants reused across the dashboard widgets
+_C_BLUE   = "#237FEA"
+_C_TEAL   = "#08C7E1"
+_C_ORANGE = "#FF7E54"
+_C_CARD   = "#071e38"
+_C_BORDER = "#0d2d4f"
+_C_MUTED  = "#8ba4c0"
+_C_WHITE  = "#ffffff"
+
+# Pipeline stage accent colours keyed by stage name (safe against order changes)
+_STAGE_COLORS: dict[str, str] = {
+    "new":         "#237FEA",
+    "contacted":   "#08C7E1",
+    "replied":     "#a78bfa",
+    "interested":  "#FF7E54",
+    "call_booked": "#f59e0b",
+    "closed_won":  "#22c55e",
+    "closed_lost": "#ef4444",
+}
+
+
+def _kpi_card_html(icon: str, color: str, label: str, value: str,
+                   delta: str, delta_up: bool = True) -> str:
+    """Return a self-contained HTML KPI card string."""
+    arrow = "↑" if delta_up else "↓"
+    delta_color = _C_TEAL if delta_up else _C_ORANGE
+    return f"""
+    <div style="background:{_C_CARD};border:1px solid {_C_BORDER};border-radius:14px;
+                padding:20px 22px;height:100%;box-sizing:border-box;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+        <div style="width:40px;height:40px;border-radius:10px;background:{color}22;
+                    display:flex;align-items:center;justify-content:center;font-size:1.15rem;">{icon}</div>
+        <div style="font-size:0.7rem;color:{_C_MUTED};font-weight:600;
+                    text-transform:uppercase;letter-spacing:.06em;">{label}</div>
+      </div>
+      <div style="font-size:2rem;font-weight:800;color:{_C_WHITE};line-height:1;margin-bottom:8px;">{value}</div>
+      <div style="font-size:0.78rem;font-weight:600;color:{delta_color};">{arrow} {delta}</div>
+    </div>"""
+
+
 def tab_dashboard() -> None:
-    # Hero banner
+    import plotly.graph_objects as go
+
+    # ── Load all data sources ───────────────────────────────────
+    leads_df    = _read_csv(LIVE_LEADS_CSV)
+    staging_df  = _read_csv(LEADS_CSV)
+    sent_df     = _read_csv(SENT_LOG_CSV)
+    pip_df      = _load_pipeline()
+    replies_df  = _read_csv(REPLIES_LOG_CSV)
+
+    # ── Compute KPIs ────────────────────────────────────────────
+    total_leads   = len(leads_df)
+    staged        = len(staging_df)
+    sent_count    = int((sent_df["status"] == "sent").sum())   if "status" in sent_df.columns   else 0
+    failed_count  = int((sent_df["status"] == "failed").sum()) if "status" in sent_df.columns   else 0
+    reply_count   = len(replies_df)
+    closed_won    = int((pip_df["status"] == "closed_won").sum()) if "status" in pip_df.columns else 0
+    revenue       = 0.0
+    if "deal_value" in pip_df.columns and "status" in pip_df.columns:
+        won_mask = pip_df["status"] == "closed_won"
+        revenue  = pd.to_numeric(pip_df.loc[won_mask, "deal_value"], errors="coerce").fillna(0).sum()
+
+    total_sent = sent_count + failed_count
+    delivery_rate = (
+        f"{sent_count / total_sent * 100:.1f}%"
+        if total_sent > 0 else "—"
+    )
+
+    # ── Page header ─────────────────────────────────────────────
     st.markdown(
-        """
-        <div style="
-            background: linear-gradient(135deg, #237FEA 0%, #08C7E1 100%);
-            border-radius: 14px;
-            padding: 28px 32px;
-            margin-bottom: 24px;
-            color: #fff;
-        ">
-            <div style="font-size:1.8rem;font-weight:800;letter-spacing:-.03em;">
-                📊 Outreach Dashboard
+        f"""
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;
+                    margin-bottom:28px;padding-bottom:16px;border-bottom:1px solid {_C_BORDER};">
+          <div>
+            <div style="font-size:1.7rem;font-weight:800;color:{_C_WHITE};
+                        letter-spacing:-.02em;line-height:1.1;">Dashboard Overview</div>
+            <div style="font-size:0.85rem;color:{_C_MUTED};margin-top:4px;">
+              Track leads, campaigns and revenue in real time
             </div>
-            <div style="font-size:1rem;opacity:.85;margin-top:6px;">
-                Your leads, sends, and results — all in one place.
-            </div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    leads_df = _read_csv(LIVE_LEADS_CSV)
-    staging_df = _read_csv(LEADS_CSV)
-    sent_df = _read_csv(SENT_LOG_CSV)
+    # ── KPI Cards Row ───────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(_kpi_card_html(
+        "🔍", _C_BLUE,   "Live Leads",     f"{total_leads:,}",
+        f"{staged:,} staged" if staged else "no leads staged",
+        delta_up=total_leads > 0,
+    ), unsafe_allow_html=True)
+    k2.markdown(_kpi_card_html(
+        "📤", _C_TEAL,   "Emails Sent",    f"{sent_count:,}",
+        f"{reply_count:,} repl{'y' if reply_count == 1 else 'ies'} detected"
+        if reply_count else "awaiting replies",
+        delta_up=reply_count > 0,
+    ), unsafe_allow_html=True)
+    k3.markdown(_kpi_card_html(
+        "✅", _C_TEAL,   "Delivery Rate",  delivery_rate,
+        f"{failed_count:,} failed" if failed_count else "no failures",
+        delta_up=failed_count == 0,
+    ), unsafe_allow_html=True)
+    k4.markdown(_kpi_card_html(
+        "🏆", _C_ORANGE, "Closed Revenue", f"${revenue:,.0f}",
+        f"{closed_won:,} deal{'s' if closed_won != 1 else ''} won"
+        if closed_won else "no closed deals yet",
+        delta_up=closed_won > 0,
+    ), unsafe_allow_html=True)
 
-    # --- KPI row ---
-    k1, k2, k3, k4, k5 = st.columns(5)
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    total_leads = len(leads_df)
-    unique_emails = leads_df["email"].str.strip().replace("", pd.NA).dropna().nunique() if "email" in leads_df.columns else 0
-    staged = len(staging_df)
+    # ── Middle row: Pipeline Breakdown  +  Send Activity Heatmap ──
+    left_col, right_col = st.columns([1.1, 0.9], gap="medium")
 
-    sent_count = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
-    failed_count = int((sent_df["status"] == "failed").sum()) if "status" in sent_df.columns else 0
-    success_rate = f"{sent_count / (sent_count + failed_count) * 100:.0f}%" if (sent_count + failed_count) > 0 else "—"
-
-    k1.metric("Live leads", f"{total_leads:,}")
-    k2.metric("Unique emails", f"{unique_emails:,}")
-    k3.metric("Emails sent", f"{sent_count:,}")
-    k4.metric("Failed sends", f"{failed_count:,}")
-    k5.metric("Staged (unreviewed)", f"{staged:,}")
-
-    st.divider()
-
-    col_left, col_right = st.columns(2)
-
-    # --- Lead score distribution ---
-    with col_left:
-        st.subheader("Lead score distribution")
-        if not leads_df.empty and "lead_score" in leads_df.columns:
-            scores = pd.to_numeric(leads_df["lead_score"], errors="coerce").dropna()
-            if not scores.empty:
-                score_counts = scores.astype(int).value_counts().sort_index().rename_axis("score").reset_index(name="count")
-                st.bar_chart(score_counts.set_index("score")["count"])
-            else:
-                st.info("No lead score data available.", icon="ℹ️")
-        else:
-            st.info("Scrape leads and push them to **Live Leads** to see data here.", icon="🔍")
-
-    # --- Sends over time ---
-    with col_right:
-        st.subheader("Sends over time")
-        if not sent_df.empty and "timestamp" in sent_df.columns and "status" in sent_df.columns:
-            sent_only = sent_df[sent_df["status"] == "sent"].copy()
-            if not sent_only.empty:
-                sent_only["date"] = pd.to_datetime(sent_only["timestamp"], errors="coerce", utc=True).dt.date
-                daily = sent_only.groupby("date").size().reset_index(name="emails_sent")
-                daily["date"] = daily["date"].astype(str)
-                st.line_chart(daily.set_index("date")["emails_sent"])
-            else:
-                st.info("No successful sends recorded yet.", icon="✉️")
-        else:
-            st.info("Send some emails via **Compose & Send** to see activity.", icon="✉️")
-
-    # --- Category breakdown ---
-    if not leads_df.empty and "category" in leads_df.columns:
-        st.divider()
-        st.subheader("Leads by category")
-        cat_counts = (
-            leads_df["category"]
-            .replace("", pd.NA)
-            .dropna()
-            .value_counts()
-            .head(15)
-            .rename_axis("category")
-            .reset_index(name="count")
-        )
-        if not cat_counts.empty:
-            st.bar_chart(cat_counts.set_index("category")["count"])
-
-    # --- Keyword performance ---
-    if not leads_df.empty and "keyword" in leads_df.columns:
-        st.divider()
-        st.subheader("Leads by keyword")
-        kw_counts = (
-            leads_df["keyword"]
-            .replace("", pd.NA)
-            .dropna()
-            .value_counts()
-            .head(20)
-            .rename_axis("keyword")
-            .reset_index(name="leads")
-        )
-        if not kw_counts.empty:
-            st.bar_chart(kw_counts.set_index("keyword")["leads"])
-
-    # --- Source breakdown ---
-    if not leads_df.empty and "source" in leads_df.columns:
-        st.divider()
-        src_col1, src_col2 = st.columns(2)
-        with src_col1:
-            st.subheader("Leads by source")
-            src_counts = (
-                leads_df["source"]
-                .replace("", pd.NA)
-                .dropna()
-                .value_counts()
-                .rename_axis("source")
-                .reset_index(name="count")
-            )
-            if not src_counts.empty:
-                st.bar_chart(src_counts.set_index("source")["count"])
-        with src_col2:
-            st.subheader("Emails found by source")
-            if "email" in leads_df.columns:
-                src_email = (
-                    leads_df[leads_df["email"].str.strip() != ""]
-                    ["source"]
-                    .replace("", pd.NA)
-                    .dropna()
-                    .value_counts()
-                    .rename_axis("source")
-                    .reset_index(name="with_email")
-                )
-                if not src_email.empty:
-                    st.bar_chart(src_email.set_index("source")["with_email"])
-
-    # --- Reply intelligence ---
-    replies_df = _read_csv(REPLIES_LOG_CSV)
-    if not replies_df.empty and "from_email" in replies_df.columns:
-        st.divider()
-        st.subheader("📬 Reply Intelligence")
-        st.caption(
-            "Cross-references detected lead replies with your leads database "
-            "to show which keywords and sources are generating responses."
+    # ── LEFT: Pipeline Breakdown ────────────────────────────────
+    with left_col:
+        st.markdown(
+            f"""<div style="font-size:1rem;font-weight:700;color:{_C_WHITE};
+                            margin-bottom:4px;">Pipeline Breakdown</div>
+                <div style="font-size:0.8rem;color:{_C_MUTED};margin-bottom:12px;">
+                  Leads by stage</div>""",
+            unsafe_allow_html=True,
         )
 
-        ri_col1, ri_col2 = st.columns(2)
-
-        # Join replies with leads by email to get keyword/source per reply
-        if not leads_df.empty and "email" in leads_df.columns:
-            lead_meta = (
-                leads_df[["email", "keyword", "source"]]
-                .drop_duplicates(subset=["email"])
-                .copy()
-            )
-            lead_meta["email"] = lead_meta["email"].str.lower().str.strip()
-            replies_joined = replies_df.copy()
-            replies_joined["from_email"] = replies_joined["from_email"].str.lower().str.strip()
-            replies_joined = replies_joined.merge(
-                lead_meta,
-                left_on="from_email",
-                right_on="email",
-                how="left",
-            )
-
-            with ri_col1:
-                st.write("**Replies by keyword**")
-                kw_replies = (
-                    replies_joined["keyword"]
-                    .replace("", pd.NA)
-                    .dropna()
-                    .value_counts()
-                    .head(15)
-                    .rename_axis("keyword")
-                    .reset_index(name="replies")
-                )
-                if not kw_replies.empty:
-                    st.bar_chart(kw_replies.set_index("keyword")["replies"])
-                else:
-                    st.info("No keyword data available yet.", icon="📊")
-
-            with ri_col2:
-                st.write("**Replies by source**")
-                src_replies = (
-                    replies_joined["source"]
-                    .replace("", pd.NA)
-                    .dropna()
-                    .value_counts()
-                    .rename_axis("source")
-                    .reset_index(name="replies")
-                )
-                if not src_replies.empty:
-                    st.bar_chart(src_replies.set_index("source")["replies"])
-                else:
-                    st.info("No source data available yet.", icon="📊")
-        else:
-            with ri_col1:
-                st.info("Scrape leads to enable reply attribution.", icon="🔍")
-
-    # --- Pipeline / Deal Tracking ---
-    pip_df = _load_pipeline()
-    st.divider()
-    st.subheader("🎯 Pipeline & Deal Tracking")
-    if pip_df.empty:
-        st.info(
-            "No pipeline data yet. Scrape leads and push them to Live Leads to populate the pipeline.",
-            icon="🎯",
-        )
-    else:
         status_counts: dict[str, int] = {s: 0 for s in PIPELINE_STATUSES}
-        if "status" in pip_df.columns:
+        if not pip_df.empty and "status" in pip_df.columns:
             for s, cnt in pip_df["status"].value_counts().items():
                 if s in status_counts:
                     status_counts[s] = int(cnt)
 
-        revenue = 0.0
-        if "deal_value" in pip_df.columns and "status" in pip_df.columns:
-            won_mask = pip_df["status"] == "closed_won"
-            revenue = pd.to_numeric(pip_df.loc[won_mask, "deal_value"], errors="coerce").fillna(0).sum()
+        total_pipeline = sum(status_counts.values()) or 1
 
-        p_cols = st.columns(7)
-        for i, s in enumerate(PIPELINE_STATUSES):
-            emoji = PIPELINE_STATUS_EMOJI.get(s, "")
-            p_cols[i].metric(f"{emoji} {s.replace('_', ' ').title()}", f"{status_counts[s]:,}")
+        if sum(status_counts.values()) > 0:
+            # Horizontal stacked bar
+            fig_pipe = go.Figure()
+            for stage in PIPELINE_STATUSES:
+                cnt = status_counts[stage]
+                if cnt > 0:
+                    fig_pipe.add_trace(go.Bar(
+                        name=f"{PIPELINE_STATUS_EMOJI[stage]} {stage.replace('_', ' ').title()}",
+                        x=[cnt],
+                        y=[""],
+                        orientation="h",
+                        marker_color=_STAGE_COLORS.get(stage, _C_BLUE),
+                        text=f"{PIPELINE_STATUS_EMOJI[stage]} {cnt}",
+                        textposition="inside",
+                        insidetextanchor="middle",
+                        hovertemplate=f"<b>{stage.replace('_', ' ').title()}</b>: {cnt}<extra></extra>",
+                    ))
+            fig_pipe.update_layout(
+                barmode="stack",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                height=56,
+                margin=dict(l=0, r=0, t=0, b=0),
+                showlegend=False,
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+            )
+            st.plotly_chart(fig_pipe, use_container_width=True,
+                            config={"displayModeBar": False})
+        else:
+            st.markdown(
+                f"<div style='background:{_C_CARD};border:1px solid {_C_BORDER};"
+                f"border-radius:10px;padding:14px 18px;color:{_C_MUTED};"
+                f"font-size:0.85rem;'>No pipeline data yet.</div>",
+                unsafe_allow_html=True,
+            )
 
-        st.caption(f"💰 **Total revenue from closed deals: ${revenue:,.0f}**")
+        # Stage breakdown list
+        st.markdown(
+            f"<div style='background:{_C_CARD};border:1px solid {_C_BORDER};"
+            f"border-radius:14px;padding:16px 20px;margin-top:4px;'>",
+            unsafe_allow_html=True,
+        )
+        for stage in PIPELINE_STATUSES:
+            cnt    = status_counts[stage]
+            pct    = cnt / total_pipeline * 100
+            color  = _STAGE_COLORS.get(stage, _C_BLUE)
+            label  = f"{PIPELINE_STATUS_EMOJI[stage]} {stage.replace('_', ' ').title()}"
+            st.markdown(
+                f"""
+                <div style="margin-bottom:10px;">
+                  <div style="display:flex;align-items:center;justify-content:space-between;
+                              margin-bottom:4px;">
+                    <span style="font-size:0.82rem;font-weight:600;color:{_C_WHITE};">{label}</span>
+                    <span style="font-size:0.82rem;font-weight:700;color:{color};">{cnt:,}</span>
+                  </div>
+                  <div style="background:{_C_BORDER};border-radius:4px;height:6px;">
+                    <div style="background:{color};border-radius:4px;height:6px;
+                                width:{pct:.1f}%;"></div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        # Conversion funnel
-        funnel_data = pd.DataFrame({
-            "stage": [PIPELINE_STATUS_EMOJI.get(s, "") + " " + s.replace("_", " ").title()
-                      for s in PIPELINE_STATUSES],
-            "count": [status_counts[s] for s in PIPELINE_STATUSES],
-        })
-        if funnel_data["count"].sum() > 0:
-            st.bar_chart(funnel_data.set_index("stage")["count"])
+    # ── RIGHT: Send Activity Heatmap ───────────────────────────
+    with right_col:
+        st.markdown(
+            f"""<div style="font-size:1rem;font-weight:700;color:{_C_WHITE};
+                            margin-bottom:4px;">Send Activity</div>
+                <div style="font-size:0.8rem;color:{_C_MUTED};margin-bottom:12px;">
+                  Sends by day &amp; hour</div>""",
+            unsafe_allow_html=True,
+        )
 
-        # Revenue attribution
-        if "keyword" in pip_df.columns and "deal_value" in pip_df.columns:
-            won_df = pip_df[pip_df["status"] == "closed_won"].copy() if "status" in pip_df.columns else pd.DataFrame()
-            if not won_df.empty:
-                st.divider()
-                rev_col1, rev_col2 = st.columns(2)
-                with rev_col1:
-                    st.write("**Revenue by keyword**")
-                    won_df["_val"] = pd.to_numeric(won_df["deal_value"], errors="coerce").fillna(0)
-                    kw_rev = (
-                        won_df.groupby("keyword")["_val"]
-                        .sum()
-                        .sort_values(ascending=False)
-                        .head(15)
-                        .rename_axis("keyword")
-                        .reset_index(name="revenue")
+        days_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        # Business hours window shown in the heatmap (06:00 – 22:00)
+        _HMAP_START_HOUR = 6
+        _HMAP_END_HOUR   = 23
+        hours_range = list(range(_HMAP_START_HOUR, _HMAP_END_HOUR))
+
+        if (
+            not sent_df.empty
+            and "timestamp" in sent_df.columns
+            and "status" in sent_df.columns
+        ):
+            sent_only = sent_df[sent_df["status"] == "sent"].copy()
+            if not sent_only.empty:
+                sent_only["dt"] = pd.to_datetime(
+                    sent_only["timestamp"], errors="coerce", utc=True
+                )
+                sent_only.dropna(subset=["dt"], inplace=True)
+                sent_only["day"]  = sent_only["dt"].dt.day_name().str[:3]
+                sent_only["hour"] = sent_only["dt"].dt.hour
+                heat = (
+                    sent_only[
+                        sent_only["day"].isin(days_order)
+                        & sent_only["hour"].isin(hours_range)
+                    ]
+                    .groupby(["day", "hour"])
+                    .size()
+                    .unstack(fill_value=0)
+                    .reindex(days_order, fill_value=0)
+                    .reindex(columns=hours_range, fill_value=0)
+                )
+                z  = heat.values.tolist()
+                xs = [f"{h:02d}:00" for h in hours_range]
+                ys = days_order
+            else:
+                z  = [[0] * len(hours_range) for _ in range(len(days_order))]
+                xs = [f"{h:02d}:00" for h in hours_range]
+                ys = days_order
+        else:
+            z  = [[0] * len(hours_range) for _ in range(len(days_order))]
+            xs = [f"{h:02d}:00" for h in hours_range]
+            ys = days_order
+
+        fig_heat = go.Figure(go.Heatmap(
+            z=z, x=xs, y=ys,
+            colorscale=[[0, _C_BORDER], [0.5, _C_BLUE], [1, _C_TEAL]],
+            showscale=False,
+            hovertemplate="<b>%{y} %{x}</b><br>Sends: %{z}<extra></extra>",
+        ))
+        fig_heat.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            height=260,
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(
+                tickfont=dict(color=_C_MUTED, size=9),
+                showgrid=False,
+                tickangle=-45,
+            ),
+            yaxis=dict(
+                tickfont=dict(color=_C_MUTED, size=10),
+                showgrid=False,
+                autorange="reversed",
+            ),
+            font=dict(color=_C_WHITE),
+        )
+        st.plotly_chart(fig_heat, use_container_width=True,
+                        config={"displayModeBar": False})
+
+        # -- Sends over time sparkline below heatmap --
+        st.markdown(
+            f"<div style='font-size:0.85rem;font-weight:700;color:{_C_WHITE};"
+            f"margin:4px 0 8px;'>Sends over time</div>",
+            unsafe_allow_html=True,
+        )
+        if not sent_df.empty and "timestamp" in sent_df.columns:
+            sent_only2 = sent_df[sent_df["status"] == "sent"].copy() if "status" in sent_df.columns else sent_df.copy()
+            if not sent_only2.empty:
+                sent_only2["date"] = pd.to_datetime(
+                    sent_only2["timestamp"], errors="coerce", utc=True
+                ).dt.date
+                daily = (
+                    sent_only2.dropna(subset=["date"])
+                    .groupby("date")
+                    .size()
+                    .reset_index(name="n")
+                )
+                daily["date"] = daily["date"].astype(str)
+                fig_line = go.Figure(go.Scatter(
+                    x=daily["date"], y=daily["n"],
+                    mode="lines",
+                    line=dict(color=_C_TEAL, width=2),
+                    fill="tozeroy",
+                    fillcolor=f"rgba(8,199,225,0.12)",
+                    hovertemplate="%{x}: %{y} sends<extra></extra>",
+                ))
+                fig_line.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    height=110,
+                    margin=dict(l=0, r=0, t=4, b=0),
+                    xaxis=dict(visible=False),
+                    yaxis=dict(visible=False, showgrid=False),
+                )
+                st.plotly_chart(fig_line, use_container_width=True,
+                                config={"displayModeBar": False})
+            else:
+                st.markdown(
+                    f"<div style='color:{_C_MUTED};font-size:0.82rem;'>No sends recorded yet.</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.markdown(
+                f"<div style='color:{_C_MUTED};font-size:0.82rem;'>No send data available.</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+
+    # ── Lead Tracker Table ─────────────────────────────────────
+    st.markdown(
+        f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-bottom:12px;">
+          <div>
+            <div style="font-size:1rem;font-weight:700;color:{_C_WHITE};">Lead Tracker</div>
+            <div style="font-size:0.8rem;color:{_C_MUTED};">Recent sends with status</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Status badge helper
+    _STATUS_BADGE: dict[str, tuple[str, str]] = {
+        "sent":   ("#08c96a22", "#22c55e"),
+        "failed": ("#ef444422", "#ef4444"),
+    }
+
+    if not sent_df.empty:
+        display_cols = [c for c in ["timestamp", "email", "subject", "status"]
+                        if c in sent_df.columns]
+        recent = sent_df[display_cols].tail(50).iloc[::-1].reset_index(drop=True)
+
+        # Build HTML table
+        thead_cells = "".join(
+            f"<th style='padding:10px 14px;text-align:left;font-size:0.75rem;"
+            f"font-weight:600;text-transform:uppercase;letter-spacing:.05em;"
+            f"color:{_C_MUTED};white-space:nowrap;'>{c.title()}</th>"
+            for c in display_cols
+        )
+        rows_html = ""
+        for _, row in recent.iterrows():
+            cells = ""
+            for col in display_cols:
+                val = str(row[col]) if pd.notna(row[col]) else "—"
+                if col == "status":
+                    bg, fg = _STATUS_BADGE.get(val, ("#ffffff11", _C_MUTED))
+                    cells += (
+                        f"<td style='padding:10px 14px;'>"
+                        f"<span style='background:{bg};color:{fg};border-radius:20px;"
+                        f"padding:3px 10px;font-size:0.75rem;font-weight:700;"
+                        f"text-transform:capitalize;'>{val}</span></td>"
                     )
-                    if not kw_rev.empty:
-                        st.bar_chart(kw_rev.set_index("keyword")["revenue"])
-                with rev_col2:
-                    st.write("**Revenue by source**")
-                    if "source" in won_df.columns:
-                        src_rev = (
-                            won_df.groupby("source")["_val"]
-                            .sum()
-                            .sort_values(ascending=False)
-                            .rename_axis("source")
-                            .reset_index(name="revenue")
-                        )
-                        if not src_rev.empty:
-                            st.bar_chart(src_rev.set_index("source")["revenue"])
+                elif col == "timestamp":
+                    cells += (
+                        f"<td style='padding:10px 14px;font-size:0.82rem;"
+                        f"color:{_C_MUTED};white-space:nowrap;'>{val[:19]}</td>"
+                    )
+                else:
+                    cells += (
+                        f"<td style='padding:10px 14px;font-size:0.82rem;"
+                        f"color:{_C_WHITE};max-width:240px;overflow:hidden;"
+                        f"text-overflow:ellipsis;white-space:nowrap;'>{val}</td>"
+                    )
+            rows_html += (
+                f"<tr style='border-bottom:1px solid {_C_BORDER};"
+                f"transition:background .15s;'>{cells}</tr>"
+            )
+
+        table_html = f"""
+        <div style="background:{_C_CARD};border:1px solid {_C_BORDER};border-radius:14px;
+                    overflow:hidden;overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;">
+            <thead style="background:#0a2240;">
+              <tr>{thead_cells}</tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </div>
+        """
+        st.markdown(table_html, unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f"<div style='background:{_C_CARD};border:1px solid {_C_BORDER};"
+            f"border-radius:14px;padding:24px;text-align:center;color:{_C_MUTED};"
+            f"font-size:0.88rem;'>No send activity yet. Go to <strong>Compose &amp; Send</strong> "
+            f"to start your first campaign.</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
+    # ── Lead Source & Keyword charts ───────────────────────────
+    if not leads_df.empty:
+        chart_cols = st.columns(2)
+
+        # Leads by keyword
+        with chart_cols[0]:
+            if "keyword" in leads_df.columns:
+                st.markdown(
+                    f"<div style='font-size:0.9rem;font-weight:700;color:{_C_WHITE};"
+                    f"margin-bottom:8px;'>Leads by keyword</div>",
+                    unsafe_allow_html=True,
+                )
+                kw_counts = (
+                    leads_df["keyword"].replace("", pd.NA).dropna()
+                    .value_counts().head(12)
+                    .rename_axis("keyword").reset_index(name="count")
+                )
+                if not kw_counts.empty:
+                    fig_kw = go.Figure(go.Bar(
+                        x=kw_counts["count"],
+                        y=kw_counts["keyword"],
+                        orientation="h",
+                        marker_color=_C_BLUE,
+                        hovertemplate="%{y}: %{x} leads<extra></extra>",
+                    ))
+                    fig_kw.update_layout(
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        height=280,
+                        margin=dict(l=0, r=10, t=0, b=0),
+                        xaxis=dict(
+                            showgrid=True,
+                            gridcolor=_C_BORDER,
+                            tickfont=dict(color=_C_MUTED, size=10),
+                        ),
+                        yaxis=dict(
+                            tickfont=dict(color=_C_WHITE, size=10),
+                            showgrid=False,
+                            autorange="reversed",
+                        ),
+                        font=dict(color=_C_WHITE),
+                    )
+                    st.plotly_chart(fig_kw, use_container_width=True,
+                                    config={"displayModeBar": False})
+
+        # Leads by source
+        with chart_cols[1]:
+            if "source" in leads_df.columns:
+                st.markdown(
+                    f"<div style='font-size:0.9rem;font-weight:700;color:{_C_WHITE};"
+                    f"margin-bottom:8px;'>Leads by source</div>",
+                    unsafe_allow_html=True,
+                )
+                src_counts = (
+                    leads_df["source"].replace("", pd.NA).dropna()
+                    .value_counts()
+                    .rename_axis("source").reset_index(name="count")
+                )
+                if not src_counts.empty:
+                    fig_src = go.Figure(go.Bar(
+                        x=src_counts["count"],
+                        y=src_counts["source"],
+                        orientation="h",
+                        marker_color=_C_TEAL,
+                        hovertemplate="%{y}: %{x} leads<extra></extra>",
+                    ))
+                    fig_src.update_layout(
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        height=280,
+                        margin=dict(l=0, r=10, t=0, b=0),
+                        xaxis=dict(
+                            showgrid=True,
+                            gridcolor=_C_BORDER,
+                            tickfont=dict(color=_C_MUTED, size=10),
+                        ),
+                        yaxis=dict(
+                            tickfont=dict(color=_C_WHITE, size=10),
+                            showgrid=False,
+                            autorange="reversed",
+                        ),
+                        font=dict(color=_C_WHITE),
+                    )
+                    st.plotly_chart(fig_src, use_container_width=True,
+                                    config={"displayModeBar": False})
 
 
 
