@@ -375,42 +375,54 @@ def _inject_css() -> None:
     st.markdown(
         """
         <style>
+        /* ── Font imports ─────────────────────────────────────────── */
+        /* Primary: THICCCBOI (Wix Fonts via Fontshare, free) */
+        @import url('https://api.fontshare.com/v2/css?f[]=thicccboi@400,500,700,800&display=swap');
+        /* Fallback: Space Grotesk (Google Fonts) */
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;800&display=swap');
+
         /* ── Global font & background ─────────────────────────────── */
-        html, body, [class*="css"] {
-            font-family: "Inter", "Segoe UI", sans-serif;
+        html, body, [class*="css"], .stApp {
+            font-family: "THICCCBOI", "Space Grotesk", "Inter", "Segoe UI", sans-serif;
+            background-color: #01120A;
+            color: #ffffff;
+        }
+
+        .main .block-container {
+            background-color: #01120A;
         }
 
         /* ── Metric cards ─────────────────────────────────────────── */
         [data-testid="stMetric"] {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
+            background: #071e38;
+            border: 1px solid #0d2d4f;
             border-radius: 12px;
             padding: 16px 20px;
-            box-shadow: 0 1px 4px rgba(0,0,0,.06);
+            box-shadow: 0 1px 4px rgba(0,0,0,.3);
         }
-        [data-testid="stMetric"]:nth-child(1) { border-top: 4px solid #6366f1; }
-        [data-testid="stMetric"]:nth-child(2) { border-top: 4px solid #0ea5e9; }
-        [data-testid="stMetric"]:nth-child(3) { border-top: 4px solid #22c55e; }
-        [data-testid="stMetric"]:nth-child(4) { border-top: 4px solid #f97316; }
-        [data-testid="stMetric"]:nth-child(5) { border-top: 4px solid #a855f7; }
+        [data-testid="stMetric"]:nth-child(1) { border-top: 4px solid #237FEA; }
+        [data-testid="stMetric"]:nth-child(2) { border-top: 4px solid #08C7E1; }
+        [data-testid="stMetric"]:nth-child(3) { border-top: 4px solid #08C7E1; }
+        [data-testid="stMetric"]:nth-child(4) { border-top: 4px solid #FF7E54; }
+        [data-testid="stMetric"]:nth-child(5) { border-top: 4px solid #237FEA; }
 
         [data-testid="stMetricLabel"] {
             font-size: 0.78rem;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: .05em;
-            color: #6b7280;
+            color: #8ba4c0;
         }
         [data-testid="stMetricValue"] {
             font-size: 1.7rem;
             font-weight: 700;
-            color: #111827;
+            color: #ffffff;
         }
 
         /* ── Tabs ─────────────────────────────────────────────────── */
         .stTabs [data-baseweb="tab-list"] {
             gap: 4px;
-            background: #f9fafb;
+            background: #071e38;
             padding: 6px 6px 0;
             border-radius: 10px 10px 0 0;
         }
@@ -419,30 +431,30 @@ def _inject_css() -> None:
             padding: 8px 18px;
             font-weight: 500;
             font-size: 0.85rem;
-            color: #6b7280;
+            color: #8ba4c0;
             background: transparent;
         }
         .stTabs [aria-selected="true"] {
-            background: #ffffff !important;
-            color: #6366f1 !important;
-            border-bottom: 3px solid #6366f1;
+            background: #0d2d4f !important;
+            color: #08C7E1 !important;
+            border-bottom: 3px solid #237FEA;
             font-weight: 700;
         }
 
         /* ── Buttons ─────────────────────────────────────────────── */
         .stButton > button[kind="primary"] {
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            background: linear-gradient(135deg, #237FEA 0%, #08C7E1 100%);
             border: none;
             border-radius: 8px;
             padding: 8px 24px;
             font-weight: 600;
             color: #fff;
-            box-shadow: 0 2px 8px rgba(99,102,241,.35);
+            box-shadow: 0 2px 8px rgba(35,127,234,.35);
             transition: all .2s;
         }
         .stButton > button[kind="primary"]:hover {
             filter: brightness(1.1);
-            box-shadow: 0 4px 14px rgba(99,102,241,.5);
+            box-shadow: 0 4px 14px rgba(35,127,234,.5);
             transform: translateY(-1px);
         }
         .stButton > button[kind="secondary"] {
@@ -452,9 +464,10 @@ def _inject_css() -> None:
 
         /* ── Expander ─────────────────────────────────────────────── */
         [data-testid="stExpander"] {
-            border: 1px solid #e5e7eb;
+            border: 1px solid #0d2d4f;
             border-radius: 10px;
             overflow: hidden;
+            background: #071e38;
         }
 
         /* ── Success / Error / Warning / Info boxes ───────────────── */
@@ -464,21 +477,32 @@ def _inject_css() -> None:
 
         /* ── Sidebar branding ─────────────────────────────────────── */
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+            background: linear-gradient(180deg, #01120A 0%, #071e38 100%);
         }
         [data-testid="stSidebar"] * {
             color: #e2e8f0 !important;
         }
         [data-testid="stSidebar"] hr {
-            border-color: #334155;
+            border-color: #0d2d4f;
         }
         [data-testid="stSidebar"] [data-testid="stMetric"] {
-            background: #1e293b;
-            border-color: #334155;
-            border-top-color: #6366f1;
+            background: #0d2d4f;
+            border-color: #1a3a5c;
+            border-top-color: #237FEA;
         }
         [data-testid="stSidebar"] [data-testid="stMetricValue"] {
             color: #f8fafc !important;
+        }
+
+        /* ── Data tables ─────────────────────────────────────────── */
+        [data-testid="stDataFrame"] {
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        /* ── Divider ─────────────────────────────────────────────── */
+        hr {
+            border-color: #0d2d4f !important;
         }
         </style>
         """,
@@ -497,7 +521,7 @@ def _render_sidebar() -> None:
             <div style="text-align:center;padding:8px 0 4px">
               <div style="font-size:2.2rem">📧</div>
               <div style="font-size:1.25rem;font-weight:800;letter-spacing:-.02em;
-                          color:#f8fafc;margin-top:4px">Outreach</div>
+                          color:#08C7E1;margin-top:4px">Outreach</div>
               <div style="font-size:0.75rem;color:#94a3b8;margin-top:2px">
                 Lead generation &amp; email outreach
               </div>
@@ -578,7 +602,7 @@ def tab_dashboard() -> None:
     st.markdown(
         """
         <div style="
-            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 60%, #0ea5e9 100%);
+            background: linear-gradient(135deg, #237FEA 0%, #08C7E1 100%);
             border-radius: 14px;
             padding: 28px 32px;
             margin-bottom: 24px;
@@ -928,7 +952,7 @@ def tab_scrape() -> None:
     st.markdown(
         """
         <div style="
-            background: linear-gradient(135deg,#6366f1 0%,#8b5cf6 60%,#0ea5e9 100%);
+            background: linear-gradient(135deg,#237FEA 0%,#08C7E1 100%);
             border-radius:14px;padding:22px 28px;margin-bottom:20px;color:#fff;
         ">
             <div style="font-size:1.5rem;font-weight:800;letter-spacing:-.03em;">🔍 Scrape Leads</div>
@@ -1891,7 +1915,7 @@ def tab_pipeline() -> None:
     st.markdown(
         """
         <div style="
-            background: linear-gradient(135deg,#22c55e 0%,#0ea5e9 60%,#6366f1 100%);
+            background: linear-gradient(135deg,#08C7E1 0%,#237FEA 100%);
             border-radius:14px;padding:22px 28px;margin-bottom:20px;color:#fff;
         ">
             <div style="font-size:1.5rem;font-weight:800;letter-spacing:-.03em;">🎯 Pipeline & Deal Tracking</div>
@@ -2275,7 +2299,7 @@ def tab_follow_ups() -> None:
     st.markdown(
         """
         <div style="
-            background: linear-gradient(135deg,#f97316 0%,#ef4444 60%,#a855f7 100%);
+            background: linear-gradient(135deg,#FF7E54 0%,#237FEA 100%);
             border-radius:14px;padding:22px 28px;margin-bottom:20px;color:#fff;
         ">
             <div style="font-size:1.5rem;font-weight:800;letter-spacing:-.03em;">📅 Follow-up Sequences</div>
