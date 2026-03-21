@@ -618,14 +618,42 @@ _STAGE_COLORS: dict[str, str] = {
 }
 
 
+def _sparkline_svg(values: list[float], color: str,
+                   width: int = 80, height: int = 32) -> str:
+    """Return an inline SVG polyline sparkline from a sequence of float values."""
+    if not values or len(values) < 2:
+        return ""
+    mn, mx = min(values), max(values)
+    rng = (mx - mn) or 1
+    pad = 3
+    n = len(values)
+    pts = " ".join(
+        f"{pad + i * (width - 2 * pad) / (n - 1):.1f},"
+        f"{pad + (1 - (v - mn) / rng) * (height - 2 * pad):.1f}"
+        for i, v in enumerate(values)
+    )
+    return (
+        f'<svg width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+        f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.8" '
+        f'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    )
+
+
 def _kpi_card_html(icon: str, color: str, label: str, value: str,
-                   delta: str, delta_up: bool = True) -> str:
+                   delta: str, delta_up: bool = True,
+                   sparkline: str = "") -> str:
     """Return a self-contained HTML KPI card string."""
     arrow = "↑" if delta_up else "↓"
     delta_color = _C_TEAL if delta_up else _C_ORANGE
+    sparkline_block = (
+        f'<div style="position:absolute;bottom:16px;right:16px;opacity:0.75;">'
+        f'{sparkline}</div>'
+        if sparkline else ""
+    )
     return f"""
     <div style="background:{_C_CARD};border:1px solid {_C_BORDER};border-radius:14px;
-                padding:20px 22px;height:100%;box-sizing:border-box;">
+                padding:20px 22px;height:100%;box-sizing:border-box;position:relative;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
         <div style="width:40px;height:40px;border-radius:10px;background:{color}22;
                     display:flex;align-items:center;justify-content:center;font-size:1.15rem;">{icon}</div>
@@ -634,6 +662,7 @@ def _kpi_card_html(icon: str, color: str, label: str, value: str,
       </div>
       <div style="font-size:2rem;font-weight:800;color:{_C_WHITE};line-height:1;margin-bottom:8px;">{value}</div>
       <div style="font-size:0.78rem;font-weight:600;color:{delta_color};">{arrow} {delta}</div>
+      {sparkline_block}
     </div>"""
 
 
@@ -665,6 +694,39 @@ def tab_dashboard() -> None:
         if total_sent > 0 else "—"
     )
 
+    # ── Compute 14-day sparkline series ─────────────────────────
+    today = datetime.now(timezone.utc).date()
+    _14_days = [today - timedelta(days=d) for d in range(13, -1, -1)]
+
+    def _daily_counts(df: pd.DataFrame, ts_col: str,
+                      status_col: str = "", status_val: str = "") -> list[float]:
+        """Return a 14-element list of daily row counts."""
+        if df.empty or ts_col not in df.columns:
+            return [0.0] * 14
+        tmp = df.copy()
+        if status_col and status_val and status_col in tmp.columns:
+            tmp = tmp[tmp[status_col] == status_val]
+        tmp["_d"] = pd.to_datetime(tmp[ts_col], errors="coerce", utc=True).dt.date
+        cnts = tmp.dropna(subset=["_d"]).groupby("_d").size()
+        return [float(cnts.get(d, 0)) for d in _14_days]
+
+    leads_spark_vals   = [float(total_leads)] * 14   # static; no dated leads CSV
+    sent_spark_vals    = _daily_counts(sent_df, "timestamp", "status", "sent")
+    # delivery rate per day: sent / (sent+failed); 0.0 when no sends recorded
+    sent_per_day  = _daily_counts(sent_df, "timestamp", "status", "sent")
+    total_per_day = _daily_counts(sent_df, "timestamp")
+    dr_spark_vals = [
+        s / t * 100 if t > 0 else 0.0
+        for s, t in zip(sent_per_day, total_per_day)
+    ]
+    rev_spark_vals = _daily_counts(pip_df, "last_updated", "status", "closed_won")
+
+    # Choose sparkline colour: teal for positive metrics, orange for mixed
+    leads_spark   = _sparkline_svg(leads_spark_vals,   _C_TEAL)
+    sent_spark    = _sparkline_svg(sent_spark_vals,    _C_TEAL)
+    dr_spark      = _sparkline_svg(dr_spark_vals,      _C_TEAL)
+    rev_spark     = _sparkline_svg(rev_spark_vals,     _C_ORANGE)
+
     # ── Page header ─────────────────────────────────────────────
     st.markdown(
         f"""
@@ -688,113 +750,128 @@ def tab_dashboard() -> None:
         "🔍", _C_BLUE,   "Live Leads",     f"{total_leads:,}",
         f"{staged:,} staged" if staged else "no leads staged",
         delta_up=total_leads > 0,
+        sparkline=leads_spark,
     ), unsafe_allow_html=True)
     k2.markdown(_kpi_card_html(
         "📤", _C_TEAL,   "Emails Sent",    f"{sent_count:,}",
         f"{reply_count:,} repl{'y' if reply_count == 1 else 'ies'} detected"
         if reply_count else "awaiting replies",
         delta_up=reply_count > 0,
+        sparkline=sent_spark,
     ), unsafe_allow_html=True)
     k3.markdown(_kpi_card_html(
         "✅", _C_TEAL,   "Delivery Rate",  delivery_rate,
         f"{failed_count:,} failed" if failed_count else "no failures",
         delta_up=failed_count == 0,
+        sparkline=dr_spark,
     ), unsafe_allow_html=True)
     k4.markdown(_kpi_card_html(
         "🏆", _C_ORANGE, "Closed Revenue", f"${revenue:,.0f}",
         f"{closed_won:,} deal{'s' if closed_won != 1 else ''} won"
         if closed_won else "no closed deals yet",
         delta_up=closed_won > 0,
+        sparkline=rev_spark,
     ), unsafe_allow_html=True)
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── Middle row: Pipeline Breakdown  +  Send Activity Heatmap ──
+    # ── Middle row: Revenue Breakdown  +  Send Activity Heatmap ──
     left_col, right_col = st.columns([1.1, 0.9], gap="medium")
 
-    # ── LEFT: Pipeline Breakdown ────────────────────────────────
+    # ── LEFT: Revenue Breakdown ──────────────────────────────────
     with left_col:
-        st.markdown(
-            f"""<div style="font-size:1rem;font-weight:700;color:{_C_WHITE};
-                            margin-bottom:4px;">Pipeline Breakdown</div>
-                <div style="font-size:0.8rem;color:{_C_MUTED};margin-bottom:12px;">
-                  Leads by stage</div>""",
-            unsafe_allow_html=True,
-        )
-
-        status_counts: dict[str, int] = {s: 0 for s in PIPELINE_STATUSES}
-        if not pip_df.empty and "status" in pip_df.columns:
-            for s, cnt in pip_df["status"].value_counts().items():
-                if s in status_counts:
-                    status_counts[s] = int(cnt)
-
-        total_pipeline = sum(status_counts.values()) or 1
-
-        if sum(status_counts.values()) > 0:
-            # Horizontal stacked bar
-            fig_pipe = go.Figure()
-            for stage in PIPELINE_STATUSES:
-                cnt = status_counts[stage]
-                if cnt > 0:
-                    fig_pipe.add_trace(go.Bar(
-                        name=f"{PIPELINE_STATUS_EMOJI[stage]} {stage.replace('_', ' ').title()}",
-                        x=[cnt],
-                        y=[""],
-                        orientation="h",
-                        marker_color=_STAGE_COLORS.get(stage, _C_BLUE),
-                        text=f"{PIPELINE_STATUS_EMOJI[stage]} {cnt}",
-                        textposition="inside",
-                        insidetextanchor="middle",
-                        hovertemplate=f"<b>{stage.replace('_', ' ').title()}</b>: {cnt}<extra></extra>",
-                    ))
-            fig_pipe.update_layout(
-                barmode="stack",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                height=56,
-                margin=dict(l=0, r=0, t=0, b=0),
-                showlegend=False,
-                xaxis=dict(visible=False),
-                yaxis=dict(visible=False),
-            )
-            st.plotly_chart(fig_pipe, use_container_width=True,
-                            config={"displayModeBar": False})
+        # Compute total pipeline deal value and per-source breakdown
+        if not pip_df.empty and "deal_value" in pip_df.columns:
+            pip_df["_val"] = pd.to_numeric(pip_df["deal_value"], errors="coerce").fillna(0)
+            total_pipeline_val = pip_df["_val"].sum()
         else:
-            st.markdown(
-                f"<div style='background:{_C_CARD};border:1px solid {_C_BORDER};"
-                f"border-radius:10px;padding:14px 18px;color:{_C_MUTED};"
-                f"font-size:0.85rem;'>No pipeline data yet.</div>",
-                unsafe_allow_html=True,
-            )
+            pip_df["_val"] = 0.0
+            total_pipeline_val = 0.0
 
-        # Stage breakdown list
+        # Format headline value
+        if total_pipeline_val >= 1_000_000:
+            total_val_str = f"${total_pipeline_val / 1_000_000:.2f}M"
+        elif total_pipeline_val >= 1_000:
+            total_val_str = f"${total_pipeline_val / 1_000:.1f}K"
+        else:
+            total_val_str = f"${total_pipeline_val:,.0f}"
+
+        # Source/keyword breakdown
+        group_col = (
+            "source"   if "source"  in pip_df.columns and pip_df["source"].replace("", pd.NA).notna().any() else
+            "keyword"  if "keyword" in pip_df.columns and pip_df["keyword"].replace("", pd.NA).notna().any() else
+            None
+        )
+        if group_col:
+            src_rev = (
+                pip_df[pip_df[group_col].replace("", pd.NA).notna()]
+                .groupby(group_col)["_val"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(5)
+            )
+        else:
+            src_rev = pd.Series(dtype=float)
+
+        breakdown_max = src_rev.max() if not src_rev.empty else 1.0
+
+        # Build per-row breakdown HTML
+        _CHANNEL_COLORS = ["#237FEA", "#08C7E1", "#a78bfa", "#FF7E54", "#f59e0b"]
+        channel_rows = ""
+        for ci, (ch, val) in enumerate(src_rev.items()):
+            pct = val / breakdown_max * 100 if breakdown_max > 0 else 0
+            col = _CHANNEL_COLORS[ci % len(_CHANNEL_COLORS)]
+            if val >= 1_000_000:
+                val_str = f"${val / 1_000_000:.2f}M"
+            elif val >= 1_000:
+                val_str = f"${val / 1_000:.1f}K"
+            else:
+                val_str = f"${val:,.0f}"
+            channel_rows += f"""
+            <div style="margin-bottom:12px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;
+                          margin-bottom:4px;">
+                <span style="font-size:0.82rem;color:{_C_WHITE};font-weight:600;">
+                  <span style="display:inline-block;width:10px;height:10px;
+                               border-radius:2px;background:{col};margin-right:6px;
+                               vertical-align:middle;"></span>{ch}
+                </span>
+                <span style="font-size:0.82rem;color:{_C_MUTED};">{val_str}</span>
+              </div>
+              <div style="background:{_C_BORDER};border-radius:4px;height:5px;">
+                <div style="background:{col};border-radius:4px;height:5px;
+                            width:{pct:.1f}%;"></div>
+              </div>
+            </div>"""
+
+        no_data_msg = (
+            f"<div style='color:{_C_MUTED};font-size:0.82rem;margin-top:8px;'>"
+            "No deal values recorded yet. Update deal values in the Pipeline tab."
+            "</div>"
+        ) if src_rev.empty else ""
+
         st.markdown(
-            f"<div style='background:{_C_CARD};border:1px solid {_C_BORDER};"
-            f"border-radius:14px;padding:16px 20px;margin-top:4px;'>",
+            f"""
+            <div style="background:{_C_CARD};border:1px solid {_C_BORDER};
+                        border-radius:14px;padding:20px 22px;">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;
+                          margin-bottom:16px;">
+                <div>
+                  <div style="font-size:0.75rem;font-weight:600;color:{_C_MUTED};
+                              text-transform:uppercase;letter-spacing:.06em;
+                              margin-bottom:4px;">Revenue Breakdown</div>
+                  <div style="font-size:2rem;font-weight:800;color:{_C_WHITE};
+                              line-height:1;">{total_val_str}</div>
+                  <div style="font-size:0.75rem;color:{_C_MUTED};margin-top:4px;">
+                    Total pipeline value</div>
+                </div>
+              </div>
+              {channel_rows}
+              {no_data_msg}
+            </div>
+            """,
             unsafe_allow_html=True,
         )
-        for stage in PIPELINE_STATUSES:
-            cnt    = status_counts[stage]
-            pct    = cnt / total_pipeline * 100
-            color  = _STAGE_COLORS.get(stage, _C_BLUE)
-            label  = f"{PIPELINE_STATUS_EMOJI[stage]} {stage.replace('_', ' ').title()}"
-            st.markdown(
-                f"""
-                <div style="margin-bottom:10px;">
-                  <div style="display:flex;align-items:center;justify-content:space-between;
-                              margin-bottom:4px;">
-                    <span style="font-size:0.82rem;font-weight:600;color:{_C_WHITE};">{label}</span>
-                    <span style="font-size:0.82rem;font-weight:700;color:{color};">{cnt:,}</span>
-                  </div>
-                  <div style="background:{_C_BORDER};border-radius:4px;height:6px;">
-                    <div style="background:{color};border-radius:4px;height:6px;
-                                width:{pct:.1f}%;"></div>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
 
     # ── RIGHT: Send Activity Heatmap ───────────────────────────
     with right_col:
@@ -924,66 +1001,93 @@ def tab_dashboard() -> None:
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── Lead Tracker Table ─────────────────────────────────────
+    # ── Deal Payment Tracker ────────────────────────────────────
     st.markdown(
         f"""
         <div style="display:flex;align-items:center;justify-content:space-between;
                     margin-bottom:12px;">
           <div>
-            <div style="font-size:1rem;font-weight:700;color:{_C_WHITE};">Lead Tracker</div>
-            <div style="font-size:0.8rem;color:{_C_MUTED};">Recent sends with status</div>
+            <div style="font-size:1rem;font-weight:700;color:{_C_WHITE};">
+              Deal Payment Tracker</div>
+            <div style="font-size:0.8rem;color:{_C_MUTED};">Pipeline deals with payment status</div>
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Status badge helper
-    _STATUS_BADGE: dict[str, tuple[str, str]] = {
-        "sent":   ("#08c96a22", "#22c55e"),
-        "failed": ("#ef444422", "#ef4444"),
+    # Map pipeline statuses → payment badge (bg colour, text colour, label)
+    _DEAL_BADGE: dict[str, tuple[str, str, str]] = {
+        "closed_won":  ("#08c96a22", "#22c55e", "Paid"),
+        "interested":  ("#f59e0b22", "#f59e0b", "Pending"),
+        "call_booked": ("#f59e0b22", "#f59e0b", "Pending"),
+        "closed_lost": ("#ef444422", "#ef4444", "Reject"),
+        "replied":     ("#237FEA22", "#237FEA", "Active"),
+        "contacted":   ("#237FEA22", "#237FEA", "Active"),
+        "new":         ("#8ba4c022", "#8ba4c0", "New"),
     }
 
-    if not sent_df.empty:
-        display_cols = [c for c in ["timestamp", "email", "subject", "status"]
-                        if c in sent_df.columns]
-        recent = sent_df[display_cols].tail(50).iloc[::-1].reset_index(drop=True)
+    if not pip_df.empty:
+        # Build rows from pipeline; most recent last_updated first
+        deal_rows_df = pip_df.copy()
+        if "last_updated" in deal_rows_df.columns:
+            deal_rows_df["_ts"] = pd.to_datetime(
+                deal_rows_df["last_updated"], errors="coerce", utc=True
+            )
+            deal_rows_df = deal_rows_df.sort_values("_ts", ascending=False)
+        deal_rows_df = deal_rows_df.head(20).reset_index(drop=True)
 
-        # Build HTML table
         thead_cells = "".join(
             f"<th style='padding:10px 14px;text-align:left;font-size:0.75rem;"
             f"font-weight:600;text-transform:uppercase;letter-spacing:.05em;"
-            f"color:{_C_MUTED};white-space:nowrap;'>{c.title()}</th>"
-            for c in display_cols
+            f"color:{_C_MUTED};white-space:nowrap;'>{h}</th>"
+            for h in ["Deal ID", "Name / Email", "Date", "Amount", "Status"]
         )
+
         rows_html = ""
-        for _, row in recent.iterrows():
-            cells = ""
-            for col in display_cols:
-                val = str(row[col]) if pd.notna(row[col]) else "—"
-                if col == "status":
-                    bg, fg = _STATUS_BADGE.get(val, ("#ffffff11", _C_MUTED))
-                    cells += (
-                        f"<td style='padding:10px 14px;'>"
-                        f"<span style='background:{bg};color:{fg};border-radius:20px;"
-                        f"padding:3px 10px;font-size:0.75rem;font-weight:700;"
-                        f"text-transform:capitalize;'>{val}</span></td>"
-                    )
-                elif col == "timestamp":
-                    cells += (
-                        f"<td style='padding:10px 14px;font-size:0.82rem;"
-                        f"color:{_C_MUTED};white-space:nowrap;'>{val[:19]}</td>"
-                    )
-                else:
-                    cells += (
-                        f"<td style='padding:10px 14px;font-size:0.82rem;"
-                        f"color:{_C_WHITE};max-width:240px;overflow:hidden;"
-                        f"text-overflow:ellipsis;white-space:nowrap;'>{val}</td>"
-                    )
-            rows_html += (
-                f"<tr style='border-bottom:1px solid {_C_BORDER};"
-                f"transition:background .15s;'>{cells}</tr>"
+        for idx, row in deal_rows_df.iterrows():
+            deal_id  = f"DEAL-{int(idx) + 1:03d}"
+            name_raw = str(row.get("name", "")).strip()
+            email    = str(row.get("email", "")).strip()
+            name_val = name_raw if name_raw else email if email else "—"
+            deal_val = pd.to_numeric(row.get("deal_value", 0), errors="coerce") or 0.0
+            if deal_val >= 1_000_000:
+                amt_str = f"${deal_val / 1_000_000:.2f}M"
+            elif deal_val >= 1_000:
+                amt_str = f"${deal_val / 1_000:.1f}K"
+            else:
+                amt_str = f"${deal_val:,.0f}" if deal_val else "—"
+
+            date_str = "—"
+            ts_raw = str(row.get("last_updated", "")).strip()
+            if ts_raw:
+                try:
+                    date_str = pd.to_datetime(ts_raw, utc=True).strftime("%d %b, %Y").lstrip("0")
+                except Exception:
+                    date_str = ts_raw[:10]
+
+            status_key = str(row.get("status", "new")).strip()
+            bg, fg, badge_label = _DEAL_BADGE.get(
+                status_key, ("#8ba4c022", "#8ba4c0", status_key.replace("_", " ").title())
             )
+
+            rows_html += f"""
+            <tr style='border-bottom:1px solid {_C_BORDER};'>
+              <td style='padding:10px 14px;font-size:0.8rem;color:{_C_MUTED};
+                         white-space:nowrap;font-weight:600;'>{deal_id}</td>
+              <td style='padding:10px 14px;font-size:0.82rem;color:{_C_WHITE};
+                         max-width:200px;overflow:hidden;text-overflow:ellipsis;
+                         white-space:nowrap;'>{name_val}</td>
+              <td style='padding:10px 14px;font-size:0.82rem;color:{_C_MUTED};
+                         white-space:nowrap;'>{date_str}</td>
+              <td style='padding:10px 14px;font-size:0.82rem;font-weight:700;
+                         color:{_C_WHITE};white-space:nowrap;'>{amt_str}</td>
+              <td style='padding:10px 14px;'>
+                <span style='background:{bg};color:{fg};border-radius:20px;
+                             padding:3px 11px;font-size:0.73rem;font-weight:700;'>
+                  {badge_label}</span>
+              </td>
+            </tr>"""
 
         table_html = f"""
         <div style="background:{_C_CARD};border:1px solid {_C_BORDER};border-radius:14px;
@@ -1001,8 +1105,8 @@ def tab_dashboard() -> None:
         st.markdown(
             f"<div style='background:{_C_CARD};border:1px solid {_C_BORDER};"
             f"border-radius:14px;padding:24px;text-align:center;color:{_C_MUTED};"
-            f"font-size:0.88rem;'>No send activity yet. Go to <strong>Compose &amp; Send</strong> "
-            f"to start your first campaign.</div>",
+            f"font-size:0.88rem;'>No deals in pipeline yet. Scrape leads and push them to "
+            f"<strong>Live Leads</strong> to populate this tracker.</div>",
             unsafe_allow_html=True,
         )
 
