@@ -14,8 +14,10 @@ build/
 venv/
 env/
 
-# Output files
-emails.csv
+# Secrets — NEVER commit
+.env
+.streamlit/secrets.toml
+
 
 # OS
 .DS_Store
