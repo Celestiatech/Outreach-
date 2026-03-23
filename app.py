@@ -27,6 +27,10 @@ from typing import Dict, List, Set, Tuple
 import pandas as pd
 import streamlit as st
 
+import db
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -36,6 +40,9 @@ st.set_page_config(
     page_icon="📧",
     layout="wide",
 )
+
+# Initialise SQLite and migrate any legacy CSV files (runs once per process)
+db.init_db()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +55,11 @@ REPLIES_LOG_CSV = "replies_log.csv"  # cumulative log of lead replies detected
 PIPELINE_CSV = "pipeline.csv"        # CRM pipeline tracking per lead
 UNSUBSCRIBE_TXT = "unsubscribe.txt"
 EMAIL_TEMPLATE_TXT = "email_template.txt"
+
+# Migrate any legacy CSV / txt files into SQLite on first run
+for _legacy_csv in [LEADS_CSV, LIVE_LEADS_CSV, SENT_LOG_CSV, REPLIES_LOG_CSV, PIPELINE_CSV]:
+    db.migrate_csv_if_exists(_legacy_csv)
+db.migrate_unsubscribe_txt_if_exists(UNSUBSCRIBE_TXT)
 
 # ---------------------------------------------------------------------------
 # Pipeline / CRM constants
@@ -219,14 +231,13 @@ KEYWORD_LIBRARY: dict[str, list[str]] = {
 
 
 def _read_csv(path: str) -> pd.DataFrame:
-    p = Path(path)
-    if not p.exists() or p.stat().st_size == 0:
-        return pd.DataFrame()
-    return pd.read_csv(p, dtype=str).fillna("")
+    """Read a data file — routes known CSV names to SQLite."""
+    return db.read_csv_as_table(path)
 
 
 def _write_csv(path: str, df: pd.DataFrame) -> None:
-    df.to_csv(path, index=False)
+    """Write a data file — routes known CSV names to SQLite."""
+    db.write_csv_as_table(path, df)
 
 
 def _push_to_live_leads(records: List[Dict]) -> Tuple[int, int]:
@@ -282,18 +293,12 @@ def _classify_reply(subject: str) -> str:
 
 
 def _load_pipeline() -> pd.DataFrame:
-    """Load pipeline.csv; return empty DataFrame with correct columns if absent."""
-    p = Path(PIPELINE_CSV)
-    if not p.exists() or p.stat().st_size == 0:
-        return pd.DataFrame(columns=[
-            "email", "name", "status", "deal_value",
-            "reply_tag", "source", "keyword", "niche", "last_updated",
-        ])
-    return pd.read_csv(p, dtype=str).fillna("")
+    """Load pipeline table from SQLite."""
+    return db.read_table("pipeline")
 
 
 def _save_pipeline(df: pd.DataFrame) -> None:
-    df.to_csv(PIPELINE_CSV, index=False)
+    db.write_table("pipeline", df)
 
 
 def _upsert_pipeline_entries(records: List[Dict]) -> int:
@@ -381,24 +386,51 @@ def _inject_css() -> None:
         /* Fallback: Space Grotesk (Google Fonts) */
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;800&display=swap');
 
+        /* Theme-aware tokens (respects Streamlit light/dark) */
+        :root {
+            --oa-bg: var(--background-color, #ffffff);
+            --oa-secondary-bg: var(--secondary-background-color, #f3f4f6);
+            --oa-text: var(--text-color, #111827);
+            --oa-primary: var(--primary-color, #237FEA);
+            --oa-border: rgba(17, 24, 39, 0.10);
+            --oa-muted: rgba(17, 24, 39, 0.60);
+            --oa-shadow: 0 1px 4px rgba(0,0,0,.12);
+            --oa-tab-active-bg: rgba(17, 24, 39, 0.04);
+            --oa-glass-bg: rgba(255, 255, 255, 0.55);
+            --oa-glass-border: rgba(17, 24, 39, 0.10);
+            --oa-glass-shadow: 0 10px 30px rgba(17, 24, 39, 0.12);
+            --oa-glass-blur: 18px;
+        }
+        html[data-theme="dark"], .stApp[data-theme="dark"] {
+            --oa-border: rgba(226, 232, 240, 0.14);
+            --oa-muted: rgba(226, 232, 240, 0.65);
+            --oa-shadow: 0 1px 4px rgba(0,0,0,.35);
+            --oa-tab-active-bg: rgba(226, 232, 240, 0.06);
+            --oa-glass-bg: rgba(8, 12, 22, 0.55);
+            --oa-glass-border: rgba(226, 232, 240, 0.16);
+            --oa-glass-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+        }
+
         /* ── Global font & background ─────────────────────────────── */
         html, body, [class*="css"], .stApp {
             font-family: "THICCCBOI", "Space Grotesk", "Inter", "Segoe UI", sans-serif;
-            background-color: #01120A;
-            color: #ffffff;
+            background-color: var(--oa-bg);
+            color: var(--oa-text);
         }
 
         .main .block-container {
-            background-color: #01120A;
+            background-color: var(--oa-bg);
         }
+
 
         /* ── Metric cards ─────────────────────────────────────────── */
         [data-testid="stMetric"] {
-            background: #071e38;
-            border: 1px solid #0d2d4f;
+            background: var(--oa-glass-bg);
+            border: 1px solid var(--oa-glass-border);
             border-radius: 12px;
             padding: 16px 20px;
-            box-shadow: 0 1px 4px rgba(0,0,0,.3);
+            box-shadow: var(--oa-glass-shadow);
+            backdrop-filter: blur(var(--oa-glass-blur));
         }
         [data-testid="stMetric"]:nth-child(1) { border-top: 4px solid #237FEA; }
         [data-testid="stMetric"]:nth-child(2) { border-top: 4px solid #08C7E1; }
@@ -411,32 +443,34 @@ def _inject_css() -> None:
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: .05em;
-            color: #8ba4c0;
+            color: var(--oa-muted);
         }
         [data-testid="stMetricValue"] {
             font-size: 1.7rem;
             font-weight: 700;
-            color: #ffffff;
+            color: var(--oa-text);
         }
 
         /* ── Tabs ─────────────────────────────────────────────────── */
         .stTabs [data-baseweb="tab-list"] {
             gap: 4px;
-            background: #071e38;
+            background: var(--oa-glass-bg);
             padding: 6px 6px 0;
             border-radius: 10px 10px 0 0;
+            border: 1px solid var(--oa-glass-border);
+            backdrop-filter: blur(var(--oa-glass-blur));
         }
         .stTabs [data-baseweb="tab"] {
             border-radius: 8px 8px 0 0;
             padding: 8px 18px;
             font-weight: 500;
             font-size: 0.85rem;
-            color: #8ba4c0;
+            color: var(--oa-muted);
             background: transparent;
         }
         .stTabs [aria-selected="true"] {
-            background: #0d2d4f !important;
-            color: #08C7E1 !important;
+            background: var(--oa-tab-active-bg) !important;
+            color: var(--oa-primary) !important;
             border-bottom: 3px solid #237FEA;
             font-weight: 700;
         }
@@ -464,10 +498,12 @@ def _inject_css() -> None:
 
         /* ── Expander ─────────────────────────────────────────────── */
         [data-testid="stExpander"] {
-            border: 1px solid #0d2d4f;
+            border: 1px solid var(--oa-glass-border);
             border-radius: 10px;
             overflow: hidden;
-            background: #071e38;
+            background: var(--oa-glass-bg);
+            box-shadow: var(--oa-glass-shadow);
+            backdrop-filter: blur(var(--oa-glass-blur));
         }
 
         /* ── Success / Error / Warning / Info boxes ───────────────── */
@@ -477,21 +513,17 @@ def _inject_css() -> None:
 
         /* ── Sidebar branding ─────────────────────────────────────── */
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #01120A 0%, #071e38 100%);
-        }
-        [data-testid="stSidebar"] * {
-            color: #e2e8f0 !important;
+            background: linear-gradient(160deg, rgba(35,127,234,0.08), rgba(8,199,225,0.06)),
+                        var(--oa-secondary-bg);
         }
         [data-testid="stSidebar"] hr {
-            border-color: #0d2d4f;
+            border-color: var(--oa-glass-border);
         }
         [data-testid="stSidebar"] [data-testid="stMetric"] {
-            background: #0d2d4f;
-            border-color: #1a3a5c;
+            background: var(--oa-glass-bg);
+            border-color: var(--oa-glass-border);
             border-top-color: #237FEA;
-        }
-        [data-testid="stSidebar"] [data-testid="stMetricValue"] {
-            color: #f8fafc !important;
+            backdrop-filter: blur(var(--oa-glass-blur));
         }
 
         /* ── Data tables ─────────────────────────────────────────── */
@@ -500,9 +532,34 @@ def _inject_css() -> None:
             overflow: hidden;
         }
 
+        /* ── Glass panels for inputs/blocks ─────────────────────── */
+        [data-testid="stForm"],
+        [data-testid="stContainer"],
+        [data-testid="stDataFrame"],
+        [data-testid="stFileUploader"],
+        [data-testid="stSelectbox"],
+        [data-testid="stTextInput"],
+        [data-testid="stTextArea"],
+        [data-testid="stNumberInput"],
+        [data-testid="stMultiSelect"] {
+            background: var(--oa-glass-bg);
+            border: 1px solid var(--oa-glass-border);
+            border-radius: 12px;
+            box-shadow: var(--oa-glass-shadow);
+            backdrop-filter: blur(var(--oa-glass-blur));
+        }
+
+        .stTextInput input,
+        .stNumberInput input,
+        .stTextArea textarea,
+        .stSelectbox > div,
+        .stMultiSelect > div {
+            background: transparent !important;
+        }
+
         /* ── Divider ─────────────────────────────────────────────── */
         hr {
-            border-color: #0d2d4f !important;
+            border-color: var(--oa-border) !important;
         }
         </style>
         """,
@@ -510,87 +567,7 @@ def _inject_css() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
 
-def _render_sidebar() -> None:
-    with st.sidebar:
-        st.markdown(
-            """
-            <div style="text-align:center;padding:8px 0 4px">
-              <div style="font-size:2.2rem">📧</div>
-              <div style="font-size:1.25rem;font-weight:800;letter-spacing:-.02em;
-                          color:#08C7E1;margin-top:4px">Outreach</div>
-              <div style="font-size:0.75rem;color:#94a3b8;margin-top:2px">
-                Lead generation &amp; email outreach
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.divider()
-
-        # Quick stats from disk
-        live_df = _read_csv(LIVE_LEADS_CSV)
-        staging_df = _read_csv(LEADS_CSV)
-        sent_df = _read_csv(SENT_LOG_CSV)
-        pip_df = _load_pipeline()
-
-        live_total = len(live_df)
-        live_emails = (
-            live_df["email"].str.strip().replace("", pd.NA).dropna().nunique()
-            if "email" in live_df.columns else 0
-        )
-        staged = len(staging_df)
-        sent_n = int((sent_df["status"] == "sent").sum()) if "status" in sent_df.columns else 0
-
-        # Pipeline quick-stats
-        closed_won = int((pip_df["status"] == "closed_won").sum()) if "status" in pip_df.columns else 0
-        revenue = 0.0
-        if "deal_value" in pip_df.columns and "status" in pip_df.columns:
-            won_mask = pip_df["status"] == "closed_won"
-            revenue = pd.to_numeric(pip_df.loc[won_mask, "deal_value"], errors="coerce").fillna(0).sum()
-
-        st.caption("📊 QUICK STATS")
-        s1, s2 = st.columns(2)
-        s1.metric("Live Leads", f"{live_total:,}")
-        s2.metric("Sent", f"{sent_n:,}")
-        s1.metric("Emails", f"{live_emails:,}")
-        s2.metric("Staged", f"{staged:,}")
-
-        st.caption("💰 PIPELINE")
-        p1, p2 = st.columns(2)
-        p1.metric("Closed 🏆", f"{closed_won:,}")
-        p2.metric("Revenue", f"${revenue:,.0f}")
-
-        st.divider()
-        st.caption("🗂 TABS")
-        st.markdown(
-            """
-            | Tab | Purpose |
-            |---|---|
-            | 📊 Dashboard | KPIs & charts |
-            | 🔍 Scrape | Collect leads |
-            | 📋 Leads | Browse & filter |
-            | ✉️ Send | Compose emails |
-            | 📅 Follow-ups | Day-3 & Day-7 sequences |
-            | 📑 Sent Log | Track sends |
-            | 💬 Replies | Inbox check |
-            | 🎯 Pipeline | CRM & deal tracking |
-            | 🚫 Unsub | Opt-out list |
-            """,
-            unsafe_allow_html=False,
-        )
-
-        st.divider()
-        st.caption("⚡ TIPS")
-        st.info(
-            "1️⃣ **Scrape** leads → review the preview\n\n"
-            "2️⃣ Click **Push to Live Leads** to save them permanently\n\n"
-            "3️⃣ Go to **Compose & Send** to send outreach emails",
-            icon="💡",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -601,10 +578,10 @@ def _render_sidebar() -> None:
 _C_BLUE   = "#237FEA"
 _C_TEAL   = "#08C7E1"
 _C_ORANGE = "#FF7E54"
-_C_CARD   = "#071e38"
-_C_BORDER = "#0d2d4f"
-_C_MUTED  = "#8ba4c0"
-_C_WHITE  = "#ffffff"
+_C_CARD   = "var(--oa-secondary-bg)"
+_C_BORDER = "var(--oa-border)"
+_C_MUTED  = "var(--oa-muted)"
+_C_WHITE  = "var(--oa-text)"
 
 # Pipeline stage accent colours keyed by stage name (safe against order changes)
 _STAGE_COLORS: dict[str, str] = {
@@ -1209,19 +1186,14 @@ def tab_unsubscribe() -> None:
     st.caption("Manage opt-out addresses. These are permanently skipped on every send.")
     st.divider()
 
-    unsub_path = Path(UNSUBSCRIBE_TXT)
-
     def _load() -> List[str]:
-        if not unsub_path.exists():
-            return []
-        lines = unsub_path.read_text(encoding="utf-8").splitlines()
-        return [ln.strip().lower() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+        return db.load_unsubscribe()
 
     def _save(addresses: List[str]) -> None:
-        unsub_path.write_text("\n".join(sorted(set(addresses))) + "\n", encoding="utf-8")
+        db.save_unsubscribe(addresses)
 
     addresses = _load()
-    st.write(f"**{len(addresses)} unsubscribed address(es)** in `{UNSUBSCRIBE_TXT}`")
+    st.write(f"**{len(addresses)} unsubscribed address(es)** stored in database")
 
     # --- Add new address ---
     with st.form("add_unsub", clear_on_submit=True):
@@ -1449,6 +1421,16 @@ def tab_scrape() -> None:
             st.success(
                 f"✅ Scraped **{len(records)} row(s)** across **{len(keywords)} keyword(s)**. "
                 "Review below, then push to Live Leads when ready."
+            )
+        elif engine == "Google Maps" and any(
+            "Google Maps blocked our access" in line for line in log_lines
+        ):
+            st.error(
+                "Google Maps is blocking automated access from this machine/network.\n\n"
+                "- Wait a bit and retry, or try a different network/IP\n"
+                "- Reduce `Results per keyword`\n"
+                "- Or switch the engine to **Bing** (more reliable for scraping)\n\n"
+                "For production reliability, consider the official Google Places API."
             )
         else:
             st.warning(
@@ -1808,14 +1790,16 @@ def tab_send() -> None:
     with st.expander("🔐 SMTP Settings", expanded=True):
         sc1, sc2 = st.columns(2)
         with sc1:
-            smtp_host = st.text_input("SMTP Host", value=os.environ.get("SMTP_HOST", "smtp.gmail.com"))
-            from_email = st.text_input("From Email", value=os.environ.get("EMAIL_ADDRESS", ""))
+            smtp_host = st.text_input("SMTP Host", value=os.environ.get("SMTP_HOST", "smtp-relay.brevo.com"))
+            smtp_user = st.text_input("SMTP Username", value=os.environ.get("SMTP_USER", os.environ.get("MAIL_USERNAME", "")))
+            from_email = st.text_input("From Email", value=os.environ.get("MAIL_FROM_ADDRESS", os.environ.get("EMAIL_ADDRESS", "")))
+            reply_to = st.text_input("Reply-To Email", value=os.environ.get("MAIL_REPLY_TO", ""))
         with sc2:
-            smtp_port = st.number_input("SMTP Port", value=587, step=1)
+            smtp_port = st.number_input("SMTP Port", value=int(os.environ.get("SMTP_PORT", "587")), step=1)
             password = st.text_input("Password / App Password", type="password",
-                                     value=os.environ.get("EMAIL_PASSWORD", ""))
+                                     value=os.environ.get("SMTP_PASS", os.environ.get("MAIL_PASSWORD", os.environ.get("EMAIL_PASSWORD", ""))))
         use_ssl = st.checkbox("Use SSL (port 465)", value=False)
-        from_name = st.text_input("Sender Display Name", value="")
+        from_name = st.text_input("Sender Display Name", value=os.environ.get("MAIL_FROM_NAME", ""))
         st.caption(
             "💡 **Gmail users:** Enable 2-Step Verification and create an "
             "[App Password](https://myaccount.google.com/apppasswords). "
@@ -1933,9 +1917,11 @@ def tab_send() -> None:
             subject=subject,
             from_name=from_name,
             smtp_host=smtp_host,
+            smtp_user=smtp_user,
             smtp_port=int(smtp_port),
             ssl=use_ssl,
             email=from_email,
+            reply_to=reply_to,
             password=password,
             log=sent_log,
             unsubscribe=unsub_file,
@@ -1951,6 +1937,23 @@ def tab_send() -> None:
             tmp_f.write(resolved_template)
             tmp_template_path = tmp_f.name
         ns.template = tmp_template_path
+
+        # Export leads from SQLite to a temp CSV that bulk_emailer can read
+        _table_name = db.CSV_TO_TABLE.get(Path(leads_csv).name, "live_leads")
+        _leads_export = db.read_table(_table_name)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", prefix="outreach_leads_", delete=False, encoding="utf-8"
+        ) as _tmp_leads:
+            _leads_export.to_csv(_tmp_leads.name, index=False)
+            ns.csv = _tmp_leads.name
+
+        # Export unsubscribe list to a temp file for bulk_emailer
+        _unsub_emails = db.load_unsubscribe()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="outreach_unsub_", delete=False, encoding="utf-8"
+        ) as _tmp_unsub:
+            _tmp_unsub.write("\n".join(_unsub_emails))
+            ns.unsubscribe = _tmp_unsub.name
 
         log_lines: List[str] = []
         log_q: queue.Queue = queue.Queue()
@@ -2120,7 +2123,14 @@ def tab_replies() -> None:
                 ).strftime("%d-%b-%Y")
 
                 sent_emails: Set[str] = set()
-                if Path(sent_log_path).exists():
+                # Read sent emails from SQLite (primary) with CSV fallback
+                _sent_df = db.read_table("sent_log")
+                if not _sent_df.empty and "status" in _sent_df.columns:
+                    sent_emails = set(
+                        _sent_df.loc[_sent_df["status"] == "sent", "to_email"]
+                        .str.lower().str.strip()
+                    )
+                elif Path(sent_log_path).exists():
                     with open(sent_log_path, newline="", encoding="utf-8") as fh:
                         for row in csv.DictReader(fh):
                             if row.get("status") == "sent":
@@ -2490,19 +2500,27 @@ def _render_follow_up_send_form(
         fc1, fc2 = st.columns(2)
         with fc1:
             smtp_host = st.text_input(
-                "SMTP Host", value=os.environ.get("SMTP_HOST", "smtp.gmail.com"),
+                "SMTP Host", value=os.environ.get("SMTP_HOST", "smtp-relay.brevo.com"),
                 key=f"{key_prefix}_host",
             )
+            smtp_user = st.text_input(
+                "SMTP Username", value=os.environ.get("SMTP_USER", os.environ.get("MAIL_USERNAME", "")),
+                key=f"{key_prefix}_smtp_user",
+            )
             from_email = st.text_input(
-                "From Email", value=os.environ.get("EMAIL_ADDRESS", ""),
+                "From Email", value=os.environ.get("MAIL_FROM_ADDRESS", os.environ.get("EMAIL_ADDRESS", "")),
                 key=f"{key_prefix}_email",
             )
-            from_name = st.text_input("Sender Name", value="", key=f"{key_prefix}_fname")
+            reply_to = st.text_input(
+                "Reply-To Email", value=os.environ.get("MAIL_REPLY_TO", ""),
+                key=f"{key_prefix}_reply_to",
+            )
+            from_name = st.text_input("Sender Name", value=os.environ.get("MAIL_FROM_NAME", ""), key=f"{key_prefix}_fname")
         with fc2:
-            smtp_port = st.number_input("SMTP Port", value=587, key=f"{key_prefix}_port")
+            smtp_port = st.number_input("SMTP Port", value=int(os.environ.get("SMTP_PORT", "587")), key=f"{key_prefix}_port")
             password = st.text_input(
                 "Password / App Password", type="password",
-                value=os.environ.get("EMAIL_PASSWORD", ""),
+                value=os.environ.get("SMTP_PASS", os.environ.get("MAIL_PASSWORD", os.environ.get("EMAIL_PASSWORD", ""))),
                 key=f"{key_prefix}_pass",
             )
             use_ssl = st.checkbox("Use SSL (port 465)", value=False, key=f"{key_prefix}_ssl")
@@ -2560,19 +2578,36 @@ def _render_follow_up_send_form(
             tmp.write(resolved_body)
             tmp_path = tmp.name
 
+        # Export leads + unsubscribe from SQLite to temp files for bulk_emailer
+        _fu_leads_df = db.read_table("live_leads")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", prefix="fu_leads_", delete=False, encoding="utf-8"
+        ) as _tmp_fu_leads:
+            _fu_leads_df.to_csv(_tmp_fu_leads.name, index=False)
+            _fu_leads_path = _tmp_fu_leads.name
+
+        _fu_unsub = db.load_unsubscribe()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="fu_unsub_", delete=False, encoding="utf-8"
+        ) as _tmp_fu_unsub:
+            _tmp_fu_unsub.write("\n".join(_fu_unsub))
+            _fu_unsub_path = _tmp_fu_unsub.name
+
         ns = _ap.Namespace(
             sequence_num=sequence_num,
-            csv=LIVE_LEADS_CSV,
+            csv=_fu_leads_path,
             template=tmp_path,
             subject=subject,
             from_name=from_name,
             smtp_host=smtp_host,
+            smtp_user=smtp_user,
             smtp_port=int(smtp_port),
             ssl=use_ssl,
             email=from_email,
+            reply_to=reply_to,
             password=password,
             log=SENT_LOG_CSV,
-            unsubscribe=UNSUBSCRIBE_TXT,
+            unsubscribe=_fu_unsub_path,
             delay=2.0,
             html=False,
             dry_run=dry_run,
@@ -2751,33 +2786,66 @@ def tab_follow_ups() -> None:
 
 
 _inject_css()
-_render_sidebar()
 
-tabs = st.tabs(["📊 Dashboard", "🔍 Scrape", "📋 Leads", "✉️ Compose & Send", "📅 Follow-ups", "📑 Sent Log", "💬 Replies", "🎯 Pipeline", "🚫 Unsubscribes"])
+# ────────────────────────────────────────────────────────────────────────────
+# Modern CRM Navigation - Session State & Sidebar
+# ────────────────────────────────────────────────────────────────────────────
 
-with tabs[0]:
-    tab_dashboard()
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "Dashboard"
 
-with tabs[1]:
-    tab_scrape()
+# Tab definitions: (emoji, label, function)
+PAGES = [
+    ("📊", "Dashboard", tab_dashboard),
+    ("🔍", "Scrape", tab_scrape),
+    ("📋", "Leads", tab_leads),
+    ("✉️", "Compose & Send", tab_send),
+    ("📅", "Follow-ups", tab_follow_ups),
+    ("📑", "Sent Log", tab_sent_log),
+    ("💬", "Replies", tab_replies),
+    ("🎯", "Pipeline", tab_pipeline),
+    ("🚫", "Unsubscribes", tab_unsubscribe),
+]
 
-with tabs[2]:
-    tab_leads()
+# ────────────────────────────────────────────────────────────────────────────
+# Sidebar Navigation
+# ────────────────────────────────────────────────────────────────────────────
 
-with tabs[3]:
-    tab_send()
+with st.sidebar:
+    # Navigation section only
+    st.markdown(
+        """
+        <div style="margin-bottom:12px;">
+          <div style="font-size:0.75rem;font-weight:700;text-transform:uppercase;
+                      letter-spacing:.08em;color:var(--oa-muted);padding:0 4px;">
+            🗂 Navigation
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-with tabs[4]:
-    tab_follow_ups()
+    # Navigation buttons with active state
+    for emoji, label, _ in PAGES:
+        is_active = st.session_state.current_page == label
+        btn_style = (
+            "background:linear-gradient(135deg, #237FEA 0%, #08C7E1 100%);color:#fff;font-weight:700;"
+            if is_active
+            else "background:var(--oa-secondary-bg);color:var(--oa-text);border:1px solid var(--oa-border);"
+        )
+        if st.sidebar.button(
+            f"{emoji}  {label}",
+            use_container_width=True,
+            key=f"nav_{label}",
+            help=f"Go to {label}"
+        ):
+            st.session_state.current_page = label
 
-with tabs[5]:
-    tab_sent_log()
+# ────────────────────────────────────────────────────────────────────────────
+# Render Active Page
+# ────────────────────────────────────────────────────────────────────────────
 
-with tabs[6]:
-    tab_replies()
-
-with tabs[7]:
-    tab_pipeline()
-
-with tabs[8]:
-    tab_unsubscribe()
+for emoji, label, page_func in PAGES:
+    if st.session_state.current_page == label:
+        page_func()
+        break

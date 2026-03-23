@@ -1,0 +1,11 @@
+﻿Hi,
+
+I’m Vishal, a freelance web developer & designer based in Mohali.
+I build small business websites, landing pages, and CMS sites.
+
+Tech: Next.js, React, Laravel, WordPress, Joomla, Flutter, React Native.
+Hosting/Deploy: Vercel, AWS, cPanel, domains/hosting setup.
+Also: UI/UX, AI integrations.
+
+If you need a website, redesign, or ongoing maintenance, I’d love to help.
+Can I send you a quick portfolio or examples?

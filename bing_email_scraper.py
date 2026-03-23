@@ -477,113 +477,81 @@ def score_lead(data: dict) -> int:
 
 def bing_search(keyword: str, num_results: int = 10) -> list[str]:
     """
-    Query Google using Selenium and return a list of result URLs.
+    Query Bing and return a deduplicated list of result URLs.
 
-    Uses a headless Chrome browser to render JavaScript and extract search results.
-
-    Parameters
-    ----------
-    keyword:
-        The search query string.
-    num_results:
-        Maximum number of result URLs to return.
-
-    Returns
-    -------
-    list[str]
-        Deduplicated list of result page URLs.
+    If Bing yields too few results (or blocks), fall back to DuckDuckGo's
+    HTML endpoint which is often more scraper-friendly.
     """
-    if not SELENIUM_AVAILABLE:
-        logger.error("Selenium not available. Install with: pip install selenium webdriver-manager")
-        return []
-    
     urls: list[str] = []
-    driver = None
-    
-    try:
-        # Configure Chrome with stealth settings
-        options = ChromeOptions()
-        options.add_argument("--headless")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--no-sandbox")
-        
-        # Create driver with WebDriver Manager
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        
-        # Add stealth JavaScript
-        stealth_script = """
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => false,
-        });
-        """
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {"source": stealth_script})
-        
-        logger.info("Searching Google for: %s", keyword)
-        
-        # Search on Google with proper URL encoding
-        from urllib.parse import quote
-        google_url = f"https://www.google.com/search?q={quote(keyword)}&num=10"
-        driver.get(google_url)
-        
-        # Wait and scroll to trigger lazy-loaded results
-        time.sleep(3)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        
-        # Parse the rendered HTML
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        
-        # Check for captcha/block page
-        if "detected unusual traffic" in driver.page_source.lower() or "please confirm" in driver.page_source.lower():
-            logger.warning("Google detected automated access - blocking us")
-            return []
-        
-        # Google results are in multiple formats; try all
-        # Format 1: div.g (older format)
-        results = soup.select("div.g a")
-        # Format 2: div.yuRUbf (newer format)
-        if not results:
-            results = soup.select("div.yuRUbf a")
-        # Format 3: h3 > a elements
-        if not results:
-            results = soup.select("h3 > a")
-        
-        logger.debug("Found %d potential result links", len(results))
-        
-        # Extract URLs from results
-        for tag in results:
-            href = tag.get("href", "")
-            # Skip Google's own URLs and special pages
-            if (href and
-                href.startswith("http") and 
-                "google.com" not in href and
-                "/url?q=" not in href and
-                "webcache" not in href and
-                _is_safe_url(href) and 
-                href not in urls):
+
+    def _collect_from_soup(soup: BeautifulSoup, selectors: list[str]) -> None:
+        for selector in selectors:
+            for tag in soup.select(selector):
+                href = (tag.get("href") or "").strip()
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    continue
+                if not href.startswith("http"):
+                    continue
+                if any(host in href for host in ("bing.com", "duckduckgo.com", "google.com")):
+                    continue
+                if not _is_safe_url(href):
+                    continue
+                if href in urls:
+                    continue
                 urls.append(href)
-                logger.debug("Found result: %s", href[:50])
                 if len(urls) >= num_results:
-                    break
-        
-        logger.info("Collected %d result URL(s) from Google.", len(urls))
-        
+                    return
+            if len(urls) >= num_results:
+                return
+
+    session = _create_session()
+
+    try:
+        logger.info("Searching Bing for: %s", keyword)
+        params = {"q": keyword, "count": max(num_results, RESULTS_PER_PAGE)}
+        resp = session.get(BING_SEARCH_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        _collect_from_soup(
+            soup,
+            selectors=[
+                "li.b_algo h2 a",
+                "main li.b_algo a",
+                "a[href]",
+            ],
+        )
+
+        if len(urls) < num_results:
+            logger.info(
+                "Bing returned only %d URL(s); trying DuckDuckGo fallback.",
+                len(urls),
+            )
+            ddg_resp = session.post(
+                DUCKDUCKGO_SEARCH_URL,
+                data={"q": keyword},
+                timeout=20,
+            )
+            ddg_resp.raise_for_status()
+            ddg_soup = BeautifulSoup(ddg_resp.text, "html.parser")
+            _collect_from_soup(
+                ddg_soup,
+                selectors=[
+                    "a.result__a",
+                    "a[data-testid='result-title-a']",
+                    "a[href]",
+                ],
+            )
+
+        logger.info("Collected %d result URL(s).", len(urls))
+
+    except requests.RequestException as exc:
+        logger.error("Search request failed: %s", exc)
     except Exception as exc:
-        logger.error("Error during Google search: %s", exc)
-    
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-    
+        logger.error("Error during search scraping: %s", exc)
+
     return urls[:num_results]
 
 

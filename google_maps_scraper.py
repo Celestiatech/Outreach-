@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import logging
 import os
@@ -54,6 +55,7 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
 
 # Regex that matches common email formats while rejecting obvious invalid forms.
 EMAIL_REGEX = re.compile(
@@ -185,6 +187,40 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+_GOOGLE_BLOCK_MARKERS: tuple[str, ...] = (
+    "our systems have detected unusual traffic",
+    "detected unusual traffic",
+    "sorry/index",
+    "/sorry/",
+    "recaptcha",
+    "to continue, please type the characters",
+)
+
+
+def _page_looks_google_blocked(page) -> bool:
+    """Best-effort detection for Google block / captcha pages."""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    try:
+        content = (page.content() or "").lower()
+    except Exception:
+        content = ""
+    blob = f"{url}\n{content}"
+    return any(marker in blob for marker in _GOOGLE_BLOCK_MARKERS)
+
+
+def _configure_playwright_event_loop() -> None:
+    """Ensure Windows uses an event loop policy compatible with Playwright."""
+    if os.name != "nt":
+        return
+    policy_cls = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if policy_cls is None:
+        return
+    if not isinstance(asyncio.get_event_loop_policy(), policy_cls):
+        asyncio.set_event_loop_policy(policy_cls())
 
 
 # ---------------------------------------------------------------------------
@@ -412,9 +448,20 @@ def enrich_from_website(url: str, session: requests.Session) -> dict:
         response.raise_for_status()
     except requests.TooManyRedirects:
         logger.warning("Too many redirects for %s – skipping.", url)
+        result["issues"] = ["Website unreachable (too many redirects)"]
         return result
     except requests.RequestException as exc:
         logger.warning("Could not fetch %s – %s", url, exc)
+        msg = str(exc).lower()
+        if "nameresolutionerror" in msg or "getaddrinfo failed" in msg:
+            result["issues"] = ["Website unreachable (DNS lookup failed)"]
+        elif "timed out" in msg:
+            result["issues"] = ["Website unreachable (timeout)"]
+        elif getattr(getattr(exc, "response", None), "status_code", None):
+            code = exc.response.status_code  # type: ignore[union-attr]
+            result["issues"] = [f"Website unreachable (HTTP {code})"]
+        else:
+            result["issues"] = ["Website unreachable"]
         return result
 
     html = response.text
@@ -590,6 +637,8 @@ def scrape_google_maps(
     if seen_names is None:
         seen_names = set()
 
+    _configure_playwright_event_loop()
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         context = browser.new_context(
@@ -611,6 +660,10 @@ def scrape_google_maps(
             logger.warning("Timed out loading Google Maps search page.")
             browser.close()
             return records
+        if _page_looks_google_blocked(page):
+            logger.warning("Google Maps blocked our access (captcha/unusual traffic).")
+            browser.close()
+            return records
 
         # Dismiss consent / cookie dialog if present (EU regions).
         for btn_text in ("Accept all", "Reject all", "I agree", "Agree"):
@@ -629,6 +682,10 @@ def scrape_google_maps(
             page.wait_for_selector(results_panel_selector, timeout=PANEL_TIMEOUT)
         except PlaywrightTimeoutError:
             logger.warning("Results panel did not appear; no results collected.")
+            browser.close()
+            return records
+        if _page_looks_google_blocked(page):
+            logger.warning("Google Maps blocked our access (captcha/unusual traffic).")
             browser.close()
             return records
 
@@ -681,6 +738,9 @@ def scrape_google_maps(
             except PlaywrightTimeoutError:
                 logger.warning("Timed out loading listing page, skipping.")
                 continue
+            if _page_looks_google_blocked(page):
+                logger.warning("Google Maps blocked our access (captcha/unusual traffic).")
+                break
 
             # --- Name ---
             name = ""

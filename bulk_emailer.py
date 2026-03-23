@@ -134,7 +134,15 @@ def _migrate_sent_log(path: str) -> None:
 
 
 def _append_sent_log(log_path: str, record: dict) -> None:
-    """Append one *record* to the sent log CSV, writing a header if needed."""
+    """Append one *record* to the sent log — writes to SQLite and CSV."""
+    # Write to SQLite (primary store)
+    try:
+        import db as _db
+        _db.append_sent_log_row({f: record.get(f, "") for f in SENT_LOG_FIELDNAMES})
+    except Exception:
+        pass  # never block an email send due to db error
+
+    # Also write CSV for backward compatibility
     _migrate_sent_log(log_path)
     p = Path(log_path)
     file_exists = p.exists() and p.stat().st_size > 0
@@ -189,12 +197,15 @@ def _build_message(
     to_email: str,
     subject: str,
     body: str,
+    reply_to: str = "",
     is_html: bool = False,
 ) -> MIMEMultipart:
     msg = MIMEMultipart("alternative")
     msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
     msg["To"] = to_email
     msg["Subject"] = subject
+    if reply_to:
+        msg["Reply-To"] = reply_to
     msg.attach(MIMEText(body, "html" if is_html else "plain", "utf-8"))
     return msg
 
@@ -244,13 +255,31 @@ def cmd_send(args: argparse.Namespace) -> None:
     # --- Resolve credentials ---
     smtp_host = args.smtp_host or os.environ.get("SMTP_HOST", "")
     smtp_port = args.smtp_port if args.smtp_port is not None else int(os.environ.get("SMTP_PORT", "587"))
-    from_email = args.email or os.environ.get("EMAIL_ADDRESS", "")
-    password = args.password or os.environ.get("EMAIL_PASSWORD", "")
+    smtp_user = (
+        getattr(args, "smtp_user", "")
+        or os.environ.get("SMTP_USER", "")
+        or os.environ.get("MAIL_USERNAME", "")
+    )
+    from_email = (
+        args.email
+        or os.environ.get("MAIL_FROM_ADDRESS", "")
+        or os.environ.get("EMAIL_ADDRESS", "")
+        or smtp_user
+    )
+    reply_to = getattr(args, "reply_to", "") or os.environ.get("MAIL_REPLY_TO", "")
+    password = (
+        args.password
+        or os.environ.get("SMTP_PASS", "")
+        or os.environ.get("MAIL_PASSWORD", "")
+        or os.environ.get("EMAIL_PASSWORD", "")
+    )
+    if not smtp_user:
+        smtp_user = from_email
 
-    if not (smtp_host and from_email and password):
+    if not (smtp_host and smtp_user and from_email and password):
         logger.error(
-            "SMTP host, sender email, and password are all required. "
-            "Pass them via CLI flags or set SMTP_HOST / EMAIL_ADDRESS / EMAIL_PASSWORD."
+            "SMTP host, SMTP username, sender email, and password are all required. "
+            "Pass via CLI flags or set SMTP_HOST / SMTP_USER / SMTP_PASS / MAIL_FROM_ADDRESS."
         )
         raise SystemExit(1)
 
@@ -307,7 +336,7 @@ def cmd_send(args: argparse.Namespace) -> None:
                 server.ehlo()
                 server.starttls(context=context)
                 server.ehlo()
-            server.login(from_email, password)
+            server.login(smtp_user, password)
 
             for row in recipients:
                 email = row["email"].strip()
@@ -316,7 +345,15 @@ def cmd_send(args: argparse.Namespace) -> None:
 
                 subject = _render_template(args.subject, safe)
                 body = _render_template(template_body, safe)
-                msg = _build_message(from_email, args.from_name, email, subject, body, args.html)
+                msg = _build_message(
+                    from_email,
+                    args.from_name,
+                    email,
+                    subject,
+                    body,
+                    reply_to=reply_to,
+                    is_html=args.html,
+                )
 
                 log_record = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -446,12 +483,30 @@ def cmd_follow_up(args: argparse.Namespace) -> None:
     # ── Resolve SMTP credentials ─────────────────────────────────────────────
     smtp_host = args.smtp_host or os.environ.get("SMTP_HOST", "")
     smtp_port = args.smtp_port if args.smtp_port is not None else int(os.environ.get("SMTP_PORT", "587"))
-    from_email = args.email or os.environ.get("EMAIL_ADDRESS", "")
-    password = args.password or os.environ.get("EMAIL_PASSWORD", "")
+    smtp_user = (
+        getattr(args, "smtp_user", "")
+        or os.environ.get("SMTP_USER", "")
+        or os.environ.get("MAIL_USERNAME", "")
+    )
+    from_email = (
+        args.email
+        or os.environ.get("MAIL_FROM_ADDRESS", "")
+        or os.environ.get("EMAIL_ADDRESS", "")
+        or smtp_user
+    )
+    reply_to = getattr(args, "reply_to", "") or os.environ.get("MAIL_REPLY_TO", "")
+    password = (
+        args.password
+        or os.environ.get("SMTP_PASS", "")
+        or os.environ.get("MAIL_PASSWORD", "")
+        or os.environ.get("EMAIL_PASSWORD", "")
+    )
+    if not smtp_user:
+        smtp_user = from_email
 
-    if not (smtp_host and from_email and password):
+    if not (smtp_host and smtp_user and from_email and password):
         logger.error(
-            "SMTP host, sender email, and password are all required for follow-up sends."
+            "SMTP host, SMTP username, sender email, and password are all required for follow-up sends."
         )
         raise SystemExit(1)
 
@@ -481,7 +536,7 @@ def cmd_follow_up(args: argparse.Namespace) -> None:
                 server.ehlo()
                 server.starttls(context=context)
                 server.ehlo()
-            server.login(from_email, password)
+            server.login(smtp_user, password)
 
             for item in due:
                 email = item["email"]
@@ -497,7 +552,15 @@ def cmd_follow_up(args: argparse.Namespace) -> None:
 
                 subject = _render_template(args.subject, safe)
                 body = _render_template(template_body, safe)
-                msg = _build_message(from_email, args.from_name, email, subject, body, args.html)
+                msg = _build_message(
+                    from_email,
+                    args.from_name,
+                    email,
+                    subject,
+                    body,
+                    reply_to=reply_to,
+                    is_html=args.html,
+                )
 
                 log_record = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -672,6 +735,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="SMTP server hostname (or set SMTP_HOST env var).",
     )
     send_p.add_argument(
+        "--smtp-user", default="",
+        help="SMTP username/login (or set SMTP_USER / MAIL_USERNAME env var).",
+    )
+    send_p.add_argument(
         "--smtp-port", type=int, default=587,
         help="SMTP port (default: 587 for STARTTLS; use 465 with --ssl).",
     )
@@ -682,6 +749,10 @@ def _build_parser() -> argparse.ArgumentParser:
     send_p.add_argument(
         "--email", default="",
         help="Sender email address (or set EMAIL_ADDRESS env var).",
+    )
+    send_p.add_argument(
+        "--reply-to", default="",
+        help="Reply-To email address (or set MAIL_REPLY_TO env var).",
     )
     send_p.add_argument(
         "--password", default="",
@@ -766,9 +837,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Sender display name.",
     )
     fu_p.add_argument("--smtp-host", default="", help="SMTP server hostname.")
+    fu_p.add_argument("--smtp-user", default="", help="SMTP username/login.")
     fu_p.add_argument("--smtp-port", type=int, default=587, help="SMTP port.")
     fu_p.add_argument("--ssl", action="store_true", help="Use direct SSL (port 465).")
     fu_p.add_argument("--email", default="", help="Sender email address.")
+    fu_p.add_argument("--reply-to", default="", help="Reply-To email address.")
     fu_p.add_argument("--password", default="", help="Email password or app-password.")
     fu_p.add_argument(
         "--log", default="sent_log.csv",

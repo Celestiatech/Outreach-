@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import logging
 import os
@@ -96,6 +97,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _configure_playwright_event_loop() -> None:
+    """Ensure Windows uses an event loop policy compatible with Playwright."""
+    if os.name != "nt":
+        return
+    policy_cls = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if policy_cls is None:
+        return
+    if not isinstance(asyncio.get_event_loop_policy(), policy_cls):
+        asyncio.set_event_loop_policy(policy_cls())
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +481,8 @@ def scrape_feed(
         Flat records ready for CSV output.
     """
     records: list[dict] = []
+
+    _configure_playwright_event_loop()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
